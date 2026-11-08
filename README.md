@@ -76,7 +76,8 @@ tokens are left untouched.
 | Boosts | `{server_boostlevel}` · `{server_boostcount}` · `{server_nextboostlevel}` · `{server_nextboostlevel_required}` · `{server_nextboostlevel_until_required}` (all three return `Max Level Reached` at tier 3) |
 | Channel | `{channel}` · `{channel_name}` · `{channel_id}` · `{channel_createdate}` · `{channel_topic}` |
 | Bot & misc | `{bot}` · `{bot_name}` · `{bot_avatar}` · `{bot_id}` · `{server_prefix}` · `{date}` · `{time}` · `{timestamp}` · `{newline}` |
-| Roles | `{role:Moderator}` or `{role:123456789012345678}` — the only token that takes an argument |
+| Roles | `{role:Moderator}` or `{role:123456789012345678}` — mentions a role by name or ID |
+| Level | `{earned:TEXT}` — rendered only when a level-reward role is earned; `(role)` becomes the role mention, e.g. `{earned:You just got (role)}` |
 
 The full list is always one click away: the **Variables** button in both builders
 opens a paginated reference.

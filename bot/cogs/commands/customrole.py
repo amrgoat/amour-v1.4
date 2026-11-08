@@ -54,48 +54,6 @@ class Customrole(commands.Cog):
             
 
 
-    async def add_role2(self, *, role: int, member: discord.Member):
-        if member.guild.me.guild_permissions.manage_roles:
-            role = discord.Object(id=int(role))
-            await member.add_roles(role, reason=f"{BRAND_NAME} Customrole | Role Added ")
-
-    async def remove_role2(self, *, role: int, member: discord.Member):
-        if member.guild.me.guild_permissions.manage_roles:
-            role = discord.Object(id=int(role))
-            await member.remove_roles(role, reason=f"{BRAND_NAME} Customrole| Role Removed")
-
-    
-
-    async def handle_role_command(self, context: Context, member: discord.Member, role_type: str):
-        async with aiosqlite.connect('db/customrole.db') as db:
-            async with db.execute(f"SELECT reqrole, {role_type} FROM roles WHERE guild_id = ?", (context.guild.id,)) as cursor:
-                data = await cursor.fetchone()
-                if data:
-                    reqrole_id, role_id = data
-                    reqrole = context.guild.get_role(reqrole_id)
-                    role = context.guild.get_role(role_id)
-
-                    if reqrole:
-                        if context.author == context.guild.owner or reqrole in context.author.roles:
-                            if role:
-                                if role not in member.roles:
-                                    await self.add_role2(role=role_id, member=member)
-                                    await context.reply(view=CV2(f"{TICK} Success", f"**Given** <@&{role.id}> To {member.mention}"))
-                                else:
-                                    await self.remove_role2(role=role_id, member=member)
-                                    await context.reply(view=CV2(f"{TICK} Success", f"**Removed** <@&{role.id}> From {member.mention}"))
-                            else:
-                                await context.reply(view=CV2(f"{CROSS} Error", f"{role_type.capitalize()} role is not set up in {context.guild.name}"))
-                        else:
-                            await context.reply(view=CV2(f"{ZWARNING} Access Denied", f"You need {reqrole.mention} to run this command."))
-                    else:
-                        await context.reply(view=CV2(f"{ZWARNING} Access Denied", f"Required role is not set up in {context.guild.name}"))
-                else:
-                    await context.reply(view=CV2(f"{CROSS} Error", f"Roles configuration is not set up in {context.guild.name}"))
-
-    
-
-
     async def create_tables(self):
         async with aiosqlite.connect(DATABASE_PATH) as db:
             await db.execute('''
@@ -134,7 +92,7 @@ class Customrole(commands.Cog):
 
     async def fetch_role_data(self, guild_id):
         async with aiosqlite.connect(DATABASE_PATH) as db:
-            async with db.execute("SELECT staff, girl, vip, guest, frnd, reqrole FROM roles WHERE guild_id = ?", (guild_id,)) as cursor:
+            async with db.execute("SELECT reqrole FROM roles WHERE guild_id = ?", (guild_id,)) as cursor:
                 return await cursor.fetchone()
 
 
@@ -155,81 +113,6 @@ class Customrole(commands.Cog):
             async with db.execute("SELECT name, role_id FROM custom_roles WHERE guild_id = ?", (guild_id,)) as cursor:
                 return await cursor.fetchall()
 
-
-    @set.command(name="staff",
-                 description="Setup staff role in guild",
-                 help="Setup staff role in Guild")
-    @blacklist_check()
-    @ignore_check()
-    @commands.cooldown(1, 3, commands.BucketType.user)
-    @commands.has_permissions(administrator=True)
-    @app_commands.describe(role="Role to be added")
-    async def staff(self, context: Context, role: discord.Role) -> None:
-        if context.author == context.guild.owner or context.author.top_role.position > context.guild.me.top_role.position:
-            await self.update_role_data(context.guild.id, 'staff', role.id)
-            await context.reply(view=CV2(f"{TICK} Success", f"Added {role.mention} to `Staff` Role\n\n__**How to Use?**__\nUse `staff <user>` Command to **Add {role.mention}** role to User & use again to the same user to **Remove role**."))
-        else:
-            await context.reply(view=CV2(f"{ZWARNING} Access Denied", "Your role should be above my top role."))
-
-    @set.command(name="girl",
-                 description="Setup girl role in the Guild",
-                 help="Setup girl role in the Guild")
-    @blacklist_check()
-    @ignore_check()
-    @commands.cooldown(1, 3, commands.BucketType.user)
-    @commands.has_permissions(administrator=True)
-    @app_commands.describe(role="Role to be added")
-    async def girl(self, context: Context, role: discord.Role) -> None:
-        if context.author == context.guild.owner or context.author.top_role.position > context.guild.me.top_role.position:
-            await self.update_role_data(context.guild.id, 'girl', role.id)
-            await context.reply(view=CV2(f"{TICK} Success", f"Added {role.mention} to `Girl` Role\n\n__**How to Use?**__\nUse `girl <user>` Command to **Add {role.mention}** role to User & use again to the same user to **Remove role**."))
-        else:
-            await context.reply(view=CV2(f"{ZWARNING} Access Denied", "Your role should be above my top role."))
-
-    @set.command(name="vip",
-                 description="Setups vip role in the Guild",
-                 help="Setups vip role in the Guild")
-    @blacklist_check()
-    @ignore_check()
-    @commands.cooldown(1, 3, commands.BucketType.user)
-    @commands.has_permissions(administrator=True)
-    @app_commands.describe(role="Role to be added")
-    async def vip(self, context: Context, role: discord.Role) -> None:
-        if context.author == context.guild.owner or context.author.top_role.position > context.guild.me.top_role.position:
-            await self.update_role_data(context.guild.id, 'vip', role.id)
-            await context.reply(view=CV2(f"{TICK} Success", f"Added {role.mention} to `VIP` Role\n\n__**How to Use?**__\nUse `vip <user>` Command to **Add {role.mention}** role to User & use again to the same user to **Remove role**."))
-        else:
-            await context.reply(view=CV2(f"{ZWARNING} Access Denied", "Your role should be above my top role."))
-
-    @set.command(name="guest",
-                 description="Setup guest role in the Guild",
-                 help="Setup guest role in the Guild")
-    @blacklist_check()
-    @ignore_check()
-    @commands.cooldown(1, 3, commands.BucketType.user)
-    @commands.has_permissions(administrator=True)
-    @app_commands.describe(role="Role to be added")
-    async def guest(self, context: Context, role: discord.Role) -> None:
-        if context.author == context.guild.owner or context.author.top_role.position > context.guild.me.top_role.position:
-            await self.update_role_data(context.guild.id, 'guest', role.id)
-            await context.reply(view=CV2(f"{TICK} Success", f"Added {role.mention} to `Guest` Role\n\n__**How to Use?**__\nUse `guest <user>` Command to **Add {role.mention}** role to User & use again to the same user to **Remove role**."))
-        else:
-            await context.reply(view=CV2(f"{ZWARNING} Access Denied", "Your role should be above my top role."))
-
-    @set.command(name="friend",
-                 description="Setup friend role in the Guild",
-                 help="Setup friend role in the Guild")
-    @blacklist_check()
-    @ignore_check()
-    @commands.cooldown(1, 3, commands.BucketType.user)
-    @commands.has_permissions(administrator=True)
-    @app_commands.describe(role="Role to be added")
-    async def friend(self, context: Context, role: discord.Role) -> None:
-        if context.author == context.guild.owner or context.author.top_role.position > context.guild.me.top_role.position:
-            await self.update_role_data(context.guild.id, 'frnd', role.id)
-            await context.reply(view=CV2(f"{TICK} Success", f"Added {role.mention} to `Friend` Role\n\n__**How to Use?**__\nUse `friend <user>` Command to **Add {role.mention}** role to User & use again to the same user to **Remove role**."))
-        else:
-            await context.reply(view=CV2(f"{ZWARNING} Access Denied", "Your role should be above my top role."))
 
     @set.command(name="reqrole",
                  description="Setup required role for custom role commands",
@@ -258,18 +141,8 @@ class Customrole(commands.Cog):
     async def config(self, context: Context) -> None:
         role_data = await self.fetch_role_data(context.guild.id)
         if role_data:
-            staff = context.guild.get_role(role_data[0]).mention if role_data[0] else "None"
-            girl = context.guild.get_role(role_data[1]).mention if role_data[1] else "None"
-            vip = context.guild.get_role(role_data[2]).mention if role_data[2] else "None"
-            guest = context.guild.get_role(role_data[3]).mention if role_data[3] else "None"
-            friend = context.guild.get_role(role_data[4]).mention if role_data[4] else "None"
-            reqrole = context.guild.get_role(role_data[5]).mention if role_data[5] else "None"
+            reqrole = context.guild.get_role(role_data[0]).mention if role_data[0] else "None"
             config_text = (
-                f"**Staff Role:** {staff}\n"
-                f"**Girl Role:** {girl}\n"
-                f"**VIP Role:** {vip}\n"
-                f"**Guest Role:** {guest}\n"
-                f"**Friend Role:** {friend}\n"
                 f"**Required Role:** {reqrole}\n\n"
                 "Use Commands to assign role & use again to the same user to remove role."
             )
@@ -281,6 +154,63 @@ class Customrole(commands.Cog):
 
             
 
+
+    @set.command(name="roles", aliases=["overview"],
+                 description="Shows every custom role command, its role and the required role in one panel.",
+                 help="Shows every custom role command, its role and the required role in one panel.")
+    @blacklist_check()
+    @ignore_check()
+    @commands.cooldown(1, 3, commands.BucketType.user)
+    @commands.has_permissions(administrator=True)
+    async def roles_overview(self, context: Context) -> None:
+        role_data = await self.fetch_role_data(context.guild.id)
+        reqrole_id = role_data[0] if role_data else None
+        reqrole = context.guild.get_role(reqrole_id) if reqrole_id else None
+
+        custom_roles = await self.fetch_custom_role_data(context.guild.id)
+        custom_roles = sorted(custom_roles, key=lambda item: item[0].lower())
+
+        if reqrole:
+            required_text = reqrole.mention
+        elif reqrole_id:
+            required_text = f"{ZWARNING} Deleted role (`{reqrole_id}`)"
+        else:
+            required_text = f"{CROSS} Not set"
+
+        lines = [
+            f"**Required Role:** {required_text}",
+            "",
+            f"**Custom Role Commands:** {len(custom_roles)}",
+        ]
+
+        if custom_roles:
+            for name, role_id in custom_roles:
+                role = context.guild.get_role(role_id)
+                safe_name = str(name).replace("`", "'")
+                if role:
+                    lines.append(f"`{safe_name}` → {role.mention}")
+                else:
+                    lines.append(f"`{safe_name}` → {ZWARNING} Deleted role (`{role_id}`)")
+        else:
+            lines.append("*No custom role commands set up yet.*")
+
+        footer = "Use `setup create <name> <role>` to add one · `setup list` for a paginated list."
+
+        # Components V2 messages hold 4000 characters in total, so trim the
+        # listing on the rare chance that very long command names overflow.
+        limit = 3300
+        text = "\n".join(lines)
+        if len(text) > limit:
+            shown = []
+            for line in lines:
+                candidate = "\n".join(shown + [line])
+                if len(candidate) > limit - 80:
+                    break
+                shown.append(line)
+            remaining = max(0, len(custom_roles) - max(0, len(shown) - 3))
+            text = "\n".join(shown) + f"\n*…and {remaining} more command(s).*"
+
+        await context.reply(view=CV2("Custom Roles Overview", text, footer))
 
     @set.command(name="create",
                  description="Creates a custom role command.",
@@ -382,14 +312,12 @@ class Customrole(commands.Cog):
             removed_roles = []
             role_data = await self.fetch_role_data(context.guild.id)
             if role_data:
-                roles = ["staff", "girl", "vip", "guest", "frnd", "reqrole"]
-                for i, role_name in enumerate(roles):
-                    role_id = role_data[i]
-                    if role_id:
-                        role = context.guild.get_role(role_id)
-                        if role:
-                            removed_roles.append(f"**{role_name.capitalize()}:** {role.mention}")
-                            await self.update_role_data(context.guild.id, role_name, None)
+                reqrole_id = role_data[0]
+                if reqrole_id:
+                    reqrole = context.guild.get_role(reqrole_id)
+                    if reqrole:
+                        removed_roles.append(f"**Required:** {reqrole.mention}")
+                        await self.update_role_data(context.guild.id, "reqrole", None)
                             
                 async with aiosqlite.connect(DATABASE_PATH) as db:
                     await db.execute("DELETE FROM custom_roles WHERE guild_id = ?", (context.guild.id,))
@@ -483,61 +411,3 @@ class Customrole(commands.Cog):
                 print(f"Error: {e}")
         else:
             return
-
-    
-
-    @commands.hybrid_command(name="staff",
-         description="Gives the staff role to the user.",
-         aliases=['official'],
-         help="Gives the staff role to the user.")
-    @blacklist_check()
-    @ignore_check()
-    @commands.cooldown(1, 3, commands.BucketType.user)
-    #@commands.has_permissions(manage_roles=True)
-    async def _staff(self, context: Context, member: discord.Member) -> None:
-        await self.handle_role_command(context, member, 'staff')
-
-    @commands.hybrid_command(name="girl",
-         description="Gives the girl role to the user.",
-         aliases=['qt'],
-         help="Gives the girl role to the user.")
-    @blacklist_check()
-    @ignore_check()
-    @commands.cooldown(1, 3, commands.BucketType.user)
-    #@commands.has_permissions(manage_roles=True)
-    async def _girl(self, context: Context, member: discord.Member) -> None:
-        await self.handle_role_command(context, member, 'girl')
-
-    @commands.hybrid_command(name="vip",
-         description="Gives the VIP role to the user.",
-         help="Gives the VIP role to the user.")
-    @blacklist_check()
-    @ignore_check()
-    @commands.cooldown(1, 3, commands.BucketType.user)
-    #@commands.has_permissions(manage_roles=True)
-    async def _vip(self, context: Context, member: discord.Member) -> None:
-        await self.handle_role_command(context, member, 'vip')
-
-    @commands.hybrid_command(name="guest",
-         description="Gives the guest role to the user.",
-         help="Gives the guest role to the user.")
-    @blacklist_check()
-    @ignore_check()
-    @commands.cooldown(1, 3, commands.BucketType.user)
-    #@commands.has_permissions(manage_roles=True)
-    async def _guest(self, context: Context, member: discord.Member) -> None:
-        await self.handle_role_command(context, member, 'guest')
-
-    @commands.hybrid_command(name="friend",
-         description="Gives the friend role to the user.",
-         aliases=['frnd'],
-         help="Gives the friend role to the user.")
-    @blacklist_check()
-    @ignore_check()
-    @commands.cooldown(1, 3, commands.BucketType.user)
-    #@commands.has_permissions(manage_roles=True)
-    async def _friend(self, context: Context, member: discord.Member) -> None:
-        await self.handle_role_command(context, member, 'frnd')
-
-
- 

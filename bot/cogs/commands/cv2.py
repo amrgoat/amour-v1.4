@@ -72,6 +72,37 @@ ACTION_STYLES = {
 }
 
 
+# Searchable emoji names for the Components V2 builders. Custom emoji from the
+# bot and the guild are listed next to these, and everything is filtered by the
+# text typed into the search box.
+UNICODE_EMOJIS = {
+    "smile": "😄", "grin": "😁", "joy": "😂", "rofl": "🤣", "wink": "😉",
+    "heart": "❤️", "heart_eyes": "😍", "star": "⭐", "star2": "🌟", "fire": "🔥",
+    "sparkles": "✨", "tada": "🎉", "gift": "🎁", "crown": "👑", "gem": "💎",
+    "trophy": "🏆", "medal": "🏅", "check": "✅", "cross": "❌", "warning": "⚠️",
+    "bell": "🔔", "loudspeaker": "📢", "megaphone": "📣", "pin": "📌", "pushpin": "📍",
+    "rocket": "🚀", "zap": "⚡", "boom": "💥", "crystal_ball": "🔮", "shield": "🛡️",
+    "sword": "⚔️", "game": "🎮", "music": "🎵", "headphones": "🎧", "mic": "🎤",
+    "book": "📖", "books": "📚", "pencil": "✏️", "memo": "📝", "clipboard": "📋",
+    "calendar": "📅", "clock": "🕐", "hourglass": "⏳", "money": "💰", "coin": "🪙",
+    "cart": "🛒", "bag": "🛍️", "house": "🏠", "sun": "☀️", "moon": "🌙",
+    "cloud": "☁️", "rainbow": "🌈", "flower": "🌸", "rose": "🌹", "tree": "🌳",
+    "cat": "🐱", "dog": "🐶", "fox": "🦊", "panda": "🐼", "penguin": "🐧",
+    "unicorn": "🦄", "dragon": "🐉", "ghost": "👻", "skull": "💀", "alien": "👽",
+    "robot": "🤖", "clown": "🤡", "eyes": "👀", "wave": "👋", "clap": "👏",
+    "thumbsup": "👍", "thumbsdown": "👎", "pray": "🙏", "muscle": "💪", "ok": "👌",
+    "100": "💯", "question": "❓", "exclamation": "❗", "info": "ℹ️", "lock": "🔒",
+    "unlock": "🔓", "key": "🔑", "hammer": "🔨", "wrench": "🔧", "gear": "⚙️",
+    "bug": "🐛", "snake": "🐍", "bird": "🐦", "fish": "🐟", "apple": "🍎",
+    "pizza": "🍕", "cake": "🍰", "cookie": "🍪", "coffee": "☕", "beer": "🍺",
+    "wine": "🍷", "dice": "🎲", "art": "🎨", "camera": "📷", "film": "🎬",
+    "tv": "📺", "computer": "💻", "phone": "📱", "link": "🔗", "paperclip": "📎",
+    "scissors": "✂️", "trash": "🗑️", "recycle": "♻️", "arrow_right": "➡️",
+    "arrow_left": "⬅️", "arrow_up": "⬆️", "arrow_down": "⬇️", "plus": "➕",
+    "minus": "➖", "infinity": "♾️", "peace": "✌️", "victory": "✌️",
+}
+
+
 def _short(text: str, limit: int = 90) -> str:
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[: limit - 1] + "…"
@@ -1073,6 +1104,185 @@ class MenuOptionsView(ui.View):
         await interaction.response.edit_message(content=panel.content(), view=panel)
 
 
+def _emoji_candidates(interaction: discord.Interaction, query: str) -> list[tuple[str, str]]:
+    """Custom and Unicode emojis whose name contains ``query``."""
+    query = (query or "").strip().lower().lstrip(":")
+    found: list[tuple[str, str]] = []
+    seen: set[int] = set()
+    seen_values: set[str] = set()
+
+    sources: list[Any] = list(getattr(interaction.client, "emojis", ()) or ())
+    if interaction.guild is not None:
+        sources.extend(interaction.guild.emojis or ())
+    for emoji in sources:
+        name = getattr(emoji, "name", "") or ""
+        emoji_id = getattr(emoji, "id", None)
+        if not name or emoji_id in seen:
+            continue
+        if query and query not in name.lower():
+            continue
+        seen.add(emoji_id)
+        found.append((name, str(emoji)))
+
+    for name, glyph in UNICODE_EMOJIS.items():
+        if query and query not in name:
+            continue
+        if glyph in seen_values:
+            continue
+        seen_values.add(glyph)
+        found.append((name, glyph))
+
+    return found[:25]
+
+
+class EmojiResultsView(ui.View):
+    """Pick one search result and hand it back to the caller."""
+
+    def __init__(
+        self,
+        builder: "CV2Builder",
+        candidates: list[tuple[str, str]],
+        on_pick: Any,
+    ):
+        super().__init__(timeout=180)
+        self.builder = builder
+        self.on_pick = on_pick
+        self.values = [value for _, value in candidates]
+        select = ui.Select(
+            placeholder="Pick an emoji…",
+            options=[
+                discord.SelectOption(
+                    label=_short(name, 100) or f"emoji {index + 1}",
+                    value=str(index),
+                    emoji=value,
+                )
+                for index, (name, value) in enumerate(candidates)
+            ][:25],
+        )
+        select.callback = self.pick
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.builder.ctx.author.id:
+            await interaction.response.send_message(
+                "This builder belongs to someone else.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def pick(self, interaction: discord.Interaction):
+        try:
+            index = int(interaction.data["values"][0])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return
+        if not 0 <= index < len(self.values):
+            return
+        await interaction.response.defer()
+        await self.on_pick(interaction, self.values[index])
+        self.stop()
+
+
+class EmojiSearchModal(_BuilderModal):
+    """Search bar for emoji names, used when editing menu options."""
+
+    def __init__(self, builder: "CV2Builder", on_pick: Any):
+        super().__init__(builder, title="Search emoji")
+        self.on_pick = on_pick
+        self.query = ui.TextInput(
+            placeholder="heart, star, party, custom name…",
+            max_length=100,
+            required=False,
+        )
+        self.add_item(
+            ui.Label(
+                text="Search emoji",
+                description="Matches custom emoji names and common Unicode names.",
+                component=self.query,
+            )
+        )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await self._author_ok(interaction):
+            return
+        candidates = _emoji_candidates(interaction, self.query.value)
+        if not candidates:
+            await interaction.response.send_message(
+                f"No emoji matched `{self.query.value}`.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(
+            f"Results for **{self.query.value or 'all emoji'}** — pick one:",
+            view=EmojiResultsView(self.builder, candidates, self.on_pick),
+            ephemeral=True,
+        )
+
+
+class MenuEmojiView(ui.View):
+    """Pick which menu option should get a searched emoji."""
+
+    def __init__(self, builder: "CV2Builder", index: int):
+        super().__init__(timeout=300)
+        self.builder = builder
+        self.index = index
+        options = builder.data["blocks"][index]["options"]
+        select = ui.Select(
+            placeholder="Pick an option…",
+            options=[
+                discord.SelectOption(
+                    label=_short(f"{position}. {option['label']}", 100),
+                    value=str(position - 1),
+                    description=_short(option.get("emoji") or "no emoji", 100),
+                )
+                for position, option in enumerate(options, start=1)
+            ][:25],
+        )
+        select.callback = self.pick
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.builder.ctx.author.id:
+            await interaction.response.send_message(
+                "This builder belongs to someone else.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def pick(self, interaction: discord.Interaction):
+        try:
+            option_index = int(interaction.data["values"][0])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return
+        await interaction.response.send_modal(
+            EmojiSearchModal(self.builder, self._set_emoji(option_index))
+        )
+
+    def _set_emoji(self, option_index: int):
+        async def apply(interaction: discord.Interaction, emoji: str):
+            blocks = self.builder.data["blocks"]
+            if not 0 <= self.index < len(blocks):
+                await interaction.followup.send(
+                    "That menu no longer exists.", ephemeral=True
+                )
+                return
+            block = blocks[self.index]
+            options = block.get("options") or []
+            if not 0 <= option_index < len(options):
+                await interaction.followup.send(
+                    "That option is already gone.", ephemeral=True
+                )
+                return
+            options[option_index]["emoji"] = emoji
+            try:
+                block.update(normalize_block(block))
+            except CV2Error as exc:
+                await interaction.followup.send(str(exc), ephemeral=True)
+                return
+            await self.builder.refresh()
+            await interaction.followup.send(f"Emoji set to {emoji}.", ephemeral=True)
+
+        return apply
+
+
 class SaveNameModal(_BuilderModal):
     def __init__(self, builder: "CV2Builder"):
         super().__init__(builder, title="Save Components V2 layout")
@@ -1141,6 +1351,12 @@ class BlockActionsView(ui.View):
             )
             menu_actions.callback = self.menu_actions
             self.add_item(menu_actions)
+
+            emoji_search = ui.Button(
+                label="Search emoji", style=discord.ButtonStyle.primary
+            )
+            emoji_search.callback = self.menu_emoji
+            self.add_item(emoji_search)
 
         remove = ui.Button(label="Remove", style=discord.ButtonStyle.danger)
         remove.callback = self.remove_block
@@ -1236,6 +1452,13 @@ class BlockActionsView(ui.View):
         await interaction.response.send_message(
             "Pick an option to choose what happens when it is selected.",
             view=MenuOptionsView(self.builder, self.index),
+            ephemeral=True,
+        )
+
+    async def menu_emoji(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "Pick an option to change its emoji, then search for one.",
+            view=MenuEmojiView(self.builder, self.index),
             ephemeral=True,
         )
 

@@ -73,7 +73,8 @@ VARIABLE_DOCS: tuple[tuple[str, str], ...] = (
     ("{channel_id}", "The channel's ID."),
     ("{channel_createdate}", "When the channel was created."),
     ("{channel_topic}", "The channel's topic."),
-    ("{role:NAME}", "Mentions a role by name or ID — the only token with an argument."),
+    ("{role:NAME}", "Mentions a role by name or ID."),
+    ("{earned:TEXT}", "Only shown when a level reward role is earned — `(role)` becomes that role's mention, e.g. {earned:You just got (role)}."),
     ("{bot}", "Mentions the bot."),
     ("{bot_name}", "The bot's own Discord name."),
     ("{bot_avatar}", "The bot's avatar URL."),
@@ -347,6 +348,15 @@ def render(
         if name in ("embed", "cv2"):
             # Template functions are handled by find_template_tokens().
             return match.group(0)
+        if name == "earned":
+            # Conditional block for level rewards: it only renders when a reward
+            # role was just earned, and ``(role)`` becomes the role mention.
+            earned = lowered.get("earned", "")
+            if not earned:
+                return ""
+            template = target if target is not None else "(role)"
+            filled = template.replace("(role)", earned).replace("(roles)", earned)
+            return render(filled, variables, guild=guild)
         if target is not None and name == "role":
             mention = _role_mention(guild, target)
             return mention if mention else match.group(0)

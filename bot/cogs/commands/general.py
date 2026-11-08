@@ -380,6 +380,6 @@ class General(commands.Cog):
           "```Empower your server with blazing-fast features and 24/7 support!```\n"
           f"{ZYROXLINKS} **Quick Actions**\n"
           f">>> **[Invite {bot_name(ctx.bot)}]({bot_invite(ctx.bot)})**\n"
-          "**{support_link('Support Server')}**"
+          f"**{support_link('Support Server')}**"
       )
       await ctx.send(view=CV2(f"{ZYROXCONNECTION} {bot_name(ctx.bot)} Integration Hub!", invite_text))

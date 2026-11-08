@@ -1,7 +1,12 @@
 import discord 
 from utils.emoji import CROSS, TICK, ZWARNING
+from utils.Tools import getConfig
+from utils.greet_render import GreetingError, send_greeting
+from utils.variables import build_variables, find_template_tokens, render
+from utils.varhelp import VariablesView
 from discord import app_commands 
 from discord .ext import commands 
+from discord.ext import tasks
 import aiosqlite 
 import asyncio 
 import json 
@@ -9,6 +14,8 @@ import re
 import random 
 import math 
 from datetime import datetime ,timezone ,timedelta 
+
+IST = timezone(timedelta(hours=5, minutes=30), name="IST")
 from typing import Optional ,Dict ,List ,Tuple 
 try :
     from PIL import Image ,ImageDraw ,ImageFont ,ImageFilter ,ImageEnhance 
@@ -72,26 +79,6 @@ def hex_to_int (hex_color :str )->int :
     except (ValueError ,TypeError ):
         return 0xFF0000 
 
-class PlaceholdersView (discord .ui .View ):
-    def __init__ (self ):
-        super ().__init__ (timeout =60 )
-
-    @discord .ui .button (label ="Show Placeholders",style =discord .ButtonStyle .secondary ,emoji ="📝")
-    async def show_placeholders (self ,interaction :discord .Interaction ,button :discord .ui .Button ):
-        embed =discord .Embed (
-        title ="📝 Available Placeholders",
-        description ="**You can use these placeholders in your level up message:**\n\n"
-        "`{user}` - Mentions the user (@username)\n"
-        "`{username}` - User's display name\n"
-        "`{level}` - The new level reached\n"
-        "`{server}` - Server name\n\n"
-        "**Example:**\n"
-        "`Congratulations {user}! You've reached level {level} in {server}!`",
-        color =0xFF0000 ,
-        timestamp =datetime .now (timezone .utc )
-        )
-        await interaction .response .send_message (embed =embed ,ephemeral =True )
-
 class LevelConfigModal (discord .ui .Modal ,title ="Leveling System Configuration"):
     def __init__ (self ,cog ,current_settings ):
         super ().__init__ ()
@@ -109,7 +96,7 @@ class LevelConfigModal (discord .ui .Modal ,title ="Leveling System Configuratio
 
         self .level_up_message =discord .ui .TextInput (
         label ="Level Up Message",
-        placeholder ="Use {user}, {level}, {username}, {server} as placeholders",
+        placeholder ="{user} · {level} · {earned:(role)} · {embed:name} · {cv2:name}",
         default =current_settings .get ('level_message','Congratulations {user}! You have reached level {level}!'),
         required =True ,
         style =discord .TextStyle .paragraph ,
@@ -262,7 +249,7 @@ class LevelConfigModal (discord .ui .Modal ,title ="Leveling System Configuratio
             )
 
 
-            view =PlaceholdersView ()
+            view =VariablesView (interaction .user )
             await interaction .followup .send (embed =embed ,view =view ,ephemeral =True )
 
         except Exception as e :
@@ -286,12 +273,19 @@ class Leveling (commands .Cog ):
             await ctx .send_help (ctx .command )
 
     async def cog_load (self ):
-        """Initialize database tables"""
+        """Initialize database tables and start the background loops."""
         try :
             await self .init_database ()
-
+            for loop in (self .vc_loop ,self .schedule_loop ,self .live_loop ):
+                if not loop .is_running ():
+                    loop .start ()
         except Exception as e :
             logger .error (f"Error loading Leveling cog: {e}")
+
+    async def cog_unload (self ):
+        for loop in (self .vc_loop ,self .schedule_loop ,self .live_loop ):
+            if loop .is_running ():
+                loop .cancel ()
 
     async def init_database (self ):
         """Initialize all required database tables"""
@@ -387,6 +381,29 @@ class Leveling (commands .Cog ):
                     if "target_type"not in columns :
                         await cursor .execute ("ALTER TABLE leveling_blacklist ADD COLUMN target_type TEXT")
                         logger .info ("Added target_type column to leveling_blacklist table")
+
+                await db .execute ("""
+                    CREATE TABLE IF NOT EXISTS vc_xp (
+                        guild_id INTEGER,
+                        user_id INTEGER,
+                        xp INTEGER DEFAULT 0,
+                        minutes INTEGER DEFAULT 0,
+                        PRIMARY KEY (guild_id, user_id)
+                    )
+                """)
+
+                await db .execute ("""
+                    CREATE TABLE IF NOT EXISTS leaderboard_settings (
+                        guild_id INTEGER PRIMARY KEY,
+                        channel_id INTEGER,
+                        period TEXT,
+                        weekday INTEGER,
+                        time_ist TEXT,
+                        last_posted TEXT,
+                        live_channel_id INTEGER,
+                        live_message_id INTEGER
+                    )
+                """)
 
                 await db .commit ()
         except Exception as e :
@@ -626,130 +643,167 @@ class Leveling (commands .Cog ):
         except Exception as e :
             logger .error (f"Error handling message XP: {e}")
 
-    async def handle_level_up (self ,message ,new_level ,settings ):
-        """Handle level up notification and rewards"""
-        try :
+    async def handle_level_up(self, message, new_level, settings):
+        """Handle a chat level up."""
+        await self.announce_level_up(
+            message.guild, message.author, new_level, settings, message.channel
+        )
 
-            channel_id =settings .get ('channel_id')
-            channel =None 
+    async def announce_level_up(self, guild, member, new_level, settings,
+                                fallback_channel=None, *, destination=None,
+                                earned_roles=None):
+        """Render and send a level-up message.
 
-            if channel_id :
-                channel =self .bot .get_channel (channel_id )
+        ``earned_roles`` is only passed by ``level test`` (so nothing is
+        granted); when it is ``None`` the reward and level roles are applied
+        first so ``{earned}`` can name them.
+        """
+        try:
+            channel = destination
 
-                if channel and not channel .permissions_for (message .guild .me ).send_messages :
-                    logger .warning (f"No permission to send messages in configured level channel {channel_id}")
-                    channel =None 
+            if channel is None:
+                channel_id = settings.get('channel_id')
+                if channel_id:
+                    channel = self.bot.get_channel(channel_id)
+                    if channel and not channel.permissions_for(guild.me).send_messages:
+                        logger.warning(f"No permission to send messages in configured level channel {channel_id}")
+                        channel = None
+                if channel is None and fallback_channel is not None:
+                    channel = fallback_channel
 
+            if channel is None:
+                logger.error("No usable channel for the level-up message (set one with `level channel`)")
+                return
 
-            if not channel :
-                if not channel_id :
+            prefix = None
+            try:
+                config = await getConfig(guild.id)
+                prefix = config.get('prefix') if isinstance(config, dict) else None
+            except Exception:
+                prefix = None
 
-                    channel =message .channel 
-                else :
+            if earned_roles is None:
+                earned_roles = await self.give_level_rewards(guild, member, new_level)
+                earned_roles += await self.apply_level_roles(guild, member, new_level)
 
-                    logger .error (f"Configured level channel {channel_id} not found or not accessible")
-                    return 
+            seen = set()
+            mentions = []
+            for role in earned_roles:
+                if role is not None and role.id not in seen:
+                    seen.add(role.id)
+                    mentions.append(role.mention)
+            earned_text = ", ".join(mentions)
 
+            extra = {
+                'level': str(new_level),
+                'username': member.display_name,
+                'server': guild.name,
+                'earned': earned_text,
+            }
 
-            level_message =settings .get ('level_message','Congratulations {user}! You have reached level {level}!')
-            level_message =level_message .replace ('{user}',message .author .mention )
-            level_message =level_message .replace ('{level}',str (new_level ))
-            level_message =level_message .replace ('{username}',message .author .display_name )
-            level_message =level_message .replace ('{server}',message .guild .name )
+            level_message = settings.get('level_message') or 'Congratulations {user}! You have reached level {level}!'
 
+            lowered_message = level_message.lower()
+            if "{embed:" in lowered_message or "{cv2:" in lowered_message:
+                text, embed_name, cv2_name = find_template_tokens(level_message)
+                if embed_name or cv2_name:
+                    try:
+                        await send_greeting(
+                            channel,
+                            guild=guild,
+                            member=member,
+                            channel=channel,
+                            welcome_type="simple",
+                            welcome_message=level_message,
+                            bot=self.bot,
+                            prefix=prefix,
+                            extra=extra,
+                        )
+                        return
+                    except GreetingError as exc:
+                        logger.error(f"Level up template error: {exc}")
+                        level_message = text
 
-            embed_color =settings .get ('embed_color','#FF0000')
-            if isinstance (embed_color ,str ):
-                embed_color =hex_to_int (embed_color )
+            variables = build_variables(
+                user=member,
+                guild=guild,
+                channel=channel,
+                bot=self.bot,
+                prefix=prefix,
+                extra=extra,
+            )
+            description = render(level_message, variables, guild=guild)
 
-            embed =discord .Embed (
-            title ="🎉 Level Up!",
-            description =level_message ,
-            color =0xFF0000 ,
-            timestamp =datetime .now (timezone .utc )
+            embed_color = settings.get('embed_color') or '#FF0000'
+            if isinstance(embed_color, str):
+                try:
+                    embed_color = hex_to_int(embed_color)
+                except Exception:
+                    embed_color = 0xFF0000
+
+            embed = discord.Embed(
+                title="🎉 Level Up!",
+                description=description,
+                color=embed_color,
+                timestamp=datetime.now(timezone.utc),
             )
 
-            if settings .get ('thumbnail_enabled',True ):
-                embed .set_thumbnail (url =message .author .display_avatar .url )
+            if settings.get('thumbnail_enabled', True):
+                embed.set_thumbnail(url=member.display_avatar.url)
 
-            if settings .get ('level_image'):
-                embed .set_image (url =settings ['level_image'])
+            if settings.get('level_image'):
+                embed.set_image(url=settings['level_image'])
 
-            embed .set_footer (text =f"Level {new_level} • {message.guild.name}")
+            embed.set_footer(text=f"Level {new_level} • {guild.name}")
 
-            try :
-                await channel .send (embed =embed )
-                logger .info (f"Level up message sent for {message.author} (Level {new_level}) in channel {channel.id}")
-            except discord .Forbidden :
-                logger .error (f"No permission to send level up message in channel {channel.id}")
-            except discord .NotFound :
-                logger .error (f"Level up channel {channel.id} not found")
-            except Exception as e :
-                logger .error (f"Error sending level up message: {e}")
+            await channel.send(embed=embed)
 
+        except Exception as e:
+            logger.error(f"Error handling level up: {e}")
 
-            await self .give_level_rewards (message .guild ,message .author ,new_level )
+    async def give_level_rewards(self, guild, member, level):
+        """Give role rewards for reaching a level. Returns the roles added."""
+        granted = []
+        try:
+            async with aiosqlite.connect("db/leveling.db") as db:
+                async with db.execute(
+                    "SELECT role_id, remove_previous FROM level_rewards WHERE guild_id = ? AND level <= ? ORDER BY level DESC",
+                    (guild.id, level)
+                ) as cursor:
+                    rewards = await cursor.fetchall()
 
+            for role_id, remove_previous in rewards:
+                role = guild.get_role(role_id)
+                if role and role not in member.roles:
+                    try:
+                        await member.add_roles(role, reason=f"Level {level} reward")
+                        granted.append(role)
+                    except discord.Forbidden:
+                        logger.warning(f"No permission to add reward role {role.name} to {member}")
+                        continue
+                    except discord.HTTPException as e:
+                        logger.error(f"Failed to add reward role {role.name} to {member}: {e}")
+                        continue
 
-            await self .apply_level_roles (message .guild ,message .author ,new_level )
+                    if remove_previous:
+                        async with aiosqlite.connect("db/leveling.db") as db:
+                            async with db.execute(
+                                "SELECT role_id FROM level_rewards WHERE guild_id = ? AND level < ?",
+                                (guild.id, level)
+                            ) as cursor:
+                                prev_rewards = await cursor.fetchall()
 
-        except Exception as e :
-            logger .error (f"Error handling level up: {e}")
+                        for prev_role_id, in prev_rewards:
+                            prev_role = guild.get_role(prev_role_id)
+                            if prev_role and prev_role in member.roles:
+                                try:
+                                    await member.remove_roles(prev_role, reason=f"Upgraded to level {level}")
+                                except discord.HTTPException as e:
+                                    logger.error(f"Failed to remove previous reward role {prev_role.name}: {e}")
 
-    async def give_level_rewards (self ,guild ,member ,level ):
-        """Give role rewards for reaching a level"""
-        try :
-            async with aiosqlite .connect ("db/leveling.db")as db :
-                async with db .execute (
-                "SELECT role_id, remove_previous FROM level_rewards WHERE guild_id = ? AND level <= ? ORDER BY level DESC",
-                (guild .id ,level )
-                )as cursor :
-                    rewards =await cursor .fetchall ()
-
-            for role_id ,remove_previous in rewards :
-                role =guild .get_role (role_id )
-                if role and role not in member .roles :
-                    await member .add_roles (role ,reason =f"Level {level} reward")
-
-                    if remove_previous :
-
-                        async with aiosqlite .connect ("db/leveling.db")as db :
-                            async with db .execute (
-                            "SELECT role_id FROM level_rewards WHERE guild_id = ? AND level < ?",
-                            (guild .id ,level )
-                            )as cursor :
-                                prev_rewards =await cursor .fetchall ()
-
-                        for prev_role_id ,in prev_rewards :
-                            prev_role =guild .get_role (prev_role_id )
-                            if prev_role and prev_role in member .roles :
-                                await member .remove_roles (prev_role ,reason =f"Upgraded to level {level}")
-
-        except Exception as e :
-            logger .error (f"Error giving level rewards: {e}")
-
-    async def apply_level_roles (self ,guild ,member ,level ):
-        """Apply level roles for reaching a level"""
-        try :
-            async with aiosqlite .connect ("db/leveling.db")as db :
-                async with db .execute (
-                "SELECT role_id FROM level_roles WHERE guild_id = ? AND level <= ? ORDER BY level DESC",
-                (guild .id ,level )
-                )as cursor :
-                    level_roles =await cursor .fetchall ()
-
-            for role_id ,in level_roles :
-                role =guild .get_role (role_id )
-                if role and role not in member .roles :
-                    try :
-                        await member .add_roles (role ,reason =f"Reached level {level}")
-                    except discord .Forbidden :
-                        logger .warning (f"No permission to add role {role.name} to {member}")
-                    except Exception as e :
-                        logger .error (f"Error adding level role {role_id}: {e}")
-
-        except Exception as e :
-            logger .error (f"Error applying level roles: {e}")
+        except Exception as e:
+            logger.error(f"Error giving level rewards: {e}")
+        return granted
 
     async def get_user_data (self ,guild_id :int ,user_id :int )->tuple :
         """Get user XP and level data"""
@@ -1645,7 +1699,7 @@ class Leveling (commands .Cog ):
 
             current_msg =current_settings .get ('level_message','Congratulations {user}! You have reached level {level}!')
             await ctx .send ("💬 **What should the level-up message say?**\n"
-            f"Available placeholders: `{'{user}'}`, `{'{username}'}`, `{'{level}'}`, `{'{server}'}`\n"
+            f"Available placeholders: `{'{user}'}`, `{'{user_name}'}`, `{'{level}'}`, `{'{server_name}'}`, `{'{earned:(role)}'}`, `{'{embed:name}'}`, `{'{cv2:name}'}`\n"
             f"Current: `{current_msg[:100]}{'...' if len(current_msg) > 100 else ''}`")
 
             try :
@@ -1809,7 +1863,7 @@ class Leveling (commands .Cog ):
             inline =False 
             )
 
-            view =PlaceholdersView ()
+            view =VariablesView (ctx .author )
             await ctx .send (embed =final_embed ,view =view )
 
         except Exception as e :
@@ -2278,27 +2332,32 @@ class Leveling (commands .Cog ):
             logger .error (f"Error in blacklist list command: {e}")
             pass 
 
-    async def apply_level_roles (self ,guild ,member ,level ):
-        """Apply level-based roles to a member."""
-        try :
-            async with aiosqlite .connect (self .db_path )as db :
-                async with db .execute ("SELECT role_id FROM level_roles WHERE guild_id = ? AND level = ?",(guild .id ,level ))as cursor :
-                    result =await cursor .fetchone ()
-                    if result :
-                        role_id =result [0 ]
-                        role =guild .get_role (role_id )
-                        if role :
-                            try :
-                                await member .add_roles (role ,reason ="Reached level {}".format (level ))
-                                logger .info (f"Applied level role {role.name} to {member.name} in {guild.name}")
-                            except discord .Forbidden :
-                                logger .error (f"Missing permissions to add role {role.name} to {member.name} in {guild.name}")
-                            except discord .HTTPException as e :
-                                logger .error (f"Failed to add role {role.name} to {member.name} in {guild.name}: {e}")
-                        else :
-                            logger .warning (f"Role with ID {role_id} not found in {guild.name}")
-        except Exception as e :
-            logger .error (f"Error applying level roles: {e}")
+    async def apply_level_roles(self, guild, member, level):
+        """Apply level-based roles to a member. Returns the roles added."""
+        granted = []
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute("SELECT role_id FROM level_roles WHERE guild_id = ? AND level = ?", (guild.id, level)) as cursor:
+                    result = await cursor.fetchone()
+                    if result:
+                        role_id = result[0]
+                        role = guild.get_role(role_id)
+                        if role and role not in member.roles:
+                            try:
+                                await member.add_roles(role, reason="Reached level {}".format(level))
+                                granted.append(role)
+                                logger.info(f"Applied level role {role.name} to {member.name} in {guild.name}")
+                            except discord.Forbidden:
+                                logger.error(f"Missing permissions to add role {role.name} to {member.name} in {guild.name}")
+                            except discord.HTTPException as e:
+                                logger.error(f"Failed to add role {role.name} to {member.name} in {guild.name}: {e}")
+                        elif role:
+                            logger.info(f"{member.name} already has level role {role.name} in {guild.name}")
+                        else:
+                            logger.warning(f"Role with ID {role_id} not found in {guild.name}")
+        except Exception as e:
+            logger.error(f"Error applying level roles: {e}")
+        return granted
 
     @commands .hybrid_command (name ="setlevelrole",description ="Set a role for a specific level (admin only)")
     @commands .has_permissions (administrator =True )
@@ -2896,10 +2955,10 @@ class Leveling (commands .Cog ):
         title ="📝 Available Placeholders",
         description =(
         "**You can use these placeholders in your level-up message:**\n\n"
-        "`{user}` - Mentions the user (@username)\n"
-        "`{username}` - User's display name\n"
+        "`{user}` / `{user_name}` / `{server_name}` / `{channel}` / `{date}` … — every shared variable works\n"
         "`{level}` - The new level reached\n"
-        "`{server}` - Server name\n\n"
+        "`{earned:...}` - Only when a level reward role is earned; `(role)` becomes the role mention\n"
+        "`{embed:name}` / `{cv2:name}` - Send a saved embed or Components V2 layout\n\n"
         "**Example:**\n"
         "`Congratulations {user}! You've reached level {level} in {server}!`"
         ),
@@ -3147,5 +3206,432 @@ class Leveling (commands .Cog ):
 
         except Exception as e :
             logger .error (f"Error setting level channel: {e}")
-            pass 
+            pass
+
+    # ── Voice levels ──────────────────────────────────────────────────────
+
+    async def _vc_user_data(self, guild_id, user_id):
+        """Return (xp, level, minutes) for a member's voice activity."""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT xp, minutes FROM vc_xp WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id),
+                ) as cursor:
+                    row = await cursor.fetchone()
+            if not row:
+                return 0, 0, 0
+            xp = row[0] or 0
+            return xp, calculate_level_from_xp(xp), (row[1] or 0)
+        except Exception as e:
+            logger.error(f"Error getting VC data: {e}")
+            return 0, 0, 0
+
+    async def _vc_user_rank(self, guild_id, user_id):
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT COUNT(*) + 1 FROM vc_xp WHERE guild_id = ? AND xp > "
+                    "(SELECT COALESCE(xp, 0) FROM vc_xp WHERE guild_id = ? AND user_id = ?)",
+                    (guild_id, guild_id, user_id),
+                ) as cursor:
+                    return (await cursor.fetchone())[0]
+        except Exception as e:
+            logger.error(f"Error getting VC rank: {e}")
+            return 1
+
+    async def _award_vc_minute(self, guild, member, settings, fallback_channel=None):
+        """Give one minute of voice XP, announcing a level up when it happens."""
+        xp_gain = max(1, int(settings.get('xp_per_message', 20) or 20))
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT xp, minutes FROM vc_xp WHERE guild_id = ? AND user_id = ?",
+                (guild.id, member.id),
+            ) as cursor:
+                row = await cursor.fetchone()
+            old_xp = (row[0] or 0) if row else 0
+            minutes = (row[1] or 0) if row else 0
+            old_level = calculate_level_from_xp(old_xp)
+            new_xp = old_xp + xp_gain
+            new_level = calculate_level_from_xp(new_xp)
+            await db.execute(
+                "INSERT OR REPLACE INTO vc_xp (guild_id, user_id, xp, minutes) VALUES (?, ?, ?, ?)",
+                (guild.id, member.id, new_xp, minutes + 1),
+            )
+            await db.commit()
+
+        if new_level > old_level:
+            # Voice levels do not grant the chat reward roles.
+            await self.announce_level_up(
+                guild, member, new_level, settings, fallback_channel, earned_roles=[]
+            )
+
+    @tasks.loop(minutes=1)
+    async def vc_loop(self):
+        await self.bot.wait_until_ready()
+        for guild in list(self.bot.guilds):
+            try:
+                settings = await self.get_guild_settings(guild.id)
+                if not settings.get('enabled'):
+                    continue
+                afk_id = guild.afk_channel.id if guild.afk_channel else None
+                for channel in guild.voice_channels:
+                    if afk_id is not None and channel.id == afk_id:
+                        continue
+                    for member in list(channel.members):
+                        if member.bot:
+                            continue
+                        state = member.voice
+                        if state is None or state.self_deaf or state.deaf or state.afk:
+                            continue
+                        await self._award_vc_minute(guild, member, settings, channel)
+            except Exception as e:
+                logger.error(f"VC level loop error for guild {guild.id}: {e}")
+
+    async def _send_rank(self, ctx, member, kind):
+        guild_id = ctx.guild.id
+        if kind == "vc":
+            xp, level, minutes = await self._vc_user_data(guild_id, member.id)
+            rank = await self._vc_user_rank(guild_id, member.id)
+            title = "VC Rank"
+            count_label = "Voice minutes"
+            count_value = f"{minutes:,}"
+        else:
+            xp, level, messages = await self.get_user_data(guild_id, member.id)
+            rank = await self.get_user_rank(guild_id, member.id)
+            title = "Chat Rank"
+            count_label = "Messages"
+            count_value = f"{messages:,}"
+
+        _, progress, needed = get_level_progress(xp)
+        percentage = (progress / needed * 100) if needed > 0 else 100
+
+        embed = discord.Embed(
+            title=f"📊 {title} — {member.display_name}",
+            color=0xFF0000,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="Level", value=f"{level:,}", inline=True)
+        embed.add_field(name="XP", value=f"{xp:,}", inline=True)
+        embed.add_field(name="Rank", value=f"#{rank:,}", inline=True)
+        embed.add_field(name=count_label, value=count_value, inline=True)
+        embed.add_field(
+            name=f"Progress to level {level + 1}",
+            value=f"{get_progress_bar(progress, needed, 12)} {percentage:.1f}% ({progress:,}/{needed:,} XP)",
+            inline=False,
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        await ctx.send(embed=embed)
+
+    @commands.hybrid_command(name="chatlevel", aliases=["cl"], description="Show chat level and rank")
+    async def chatlevel(self, ctx, member: Optional[discord.Member] = None):
+        await self._send_rank(ctx, member or ctx.author, "chat")
+
+    @commands.hybrid_command(name="rankchat", aliases=["rc"], description="Show a basic chat rank")
+    async def rankchat(self, ctx, member: Optional[discord.Member] = None):
+        await self._send_rank(ctx, member or ctx.author, "chat")
+
+    @commands.hybrid_command(name="vclevel", aliases=["vl"], description="Show voice level and rank")
+    async def vclevel(self, ctx, member: Optional[discord.Member] = None):
+        await self._send_rank(ctx, member or ctx.author, "vc")
+
+    @commands.hybrid_command(name="rankvc", aliases=["rv"], description="Show a basic voice rank")
+    async def rankvc(self, ctx, member: Optional[discord.Member] = None):
+        await self._send_rank(ctx, member or ctx.author, "vc")
+
+    # ── Leaderboards ──────────────────────────────────────────────────────
+
+    async def _top_rows(self, guild_id, kind, limit=10):
+        if kind == "vc":
+            table, count_column, label = "vc_xp", "minutes", "voice minutes"
+        else:
+            table, count_column, label = "user_xp", "messages", "messages"
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                f"SELECT user_id, xp, COALESCE({count_column}, 0) FROM {table} "
+                "WHERE guild_id = ? AND xp > 0 ORDER BY xp DESC LIMIT ?",
+                (guild_id, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return rows, label
+
+    def _leaderboard_embed(self, guild, rows, kind, label, limit=10):
+        title = "VC Leaderboard" if kind == "vc" else "Chat Leaderboard"
+        lines = []
+        for position, (user_id, xp, count) in enumerate(rows, start=1):
+            member = guild.get_member(user_id)
+            name = member.display_name if member else f"user {user_id}"
+            lines.append(
+                f"`{position:02d}` **{name}** — Level {calculate_level_from_xp(xp)} · "
+                f"{xp:,} XP · {count:,} {label}"
+            )
+        embed = discord.Embed(
+            title=f"🏆 {title} — {guild.name}",
+            description="\n".join(lines) if lines else "No data yet — start chatting or join a voice channel!",
+            color=0xFF0000,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_footer(text=f"Top {limit} • {datetime.now(IST).strftime('%d %b %Y, %I:%M %p IST')}")
+        return embed
+
+    async def _both_leaderboard_embeds(self, guild, limit=10):
+        chat_rows, chat_label = await self._top_rows(guild.id, "chat", limit)
+        vc_rows, vc_label = await self._top_rows(guild.id, "vc", limit)
+        return [
+            self._leaderboard_embed(guild, chat_rows, "chat", chat_label, limit),
+            self._leaderboard_embed(guild, vc_rows, "vc", vc_label, limit),
+        ]
+
+    @commands.hybrid_group(name="leaderboard", aliases=["lb"], invoke_without_command=True, description="Chat and voice leaderboards")
+    async def leaderboard(self, ctx):
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @leaderboard.command(name="chat", description="Show the chat leaderboard")
+    async def leaderboard_chat(self, ctx):
+        rows, label = await self._top_rows(ctx.guild.id, "chat")
+        await ctx.send(embed=self._leaderboard_embed(ctx.guild, rows, "chat", label))
+
+    @leaderboard.command(name="vc", description="Show the voice leaderboard")
+    async def leaderboard_vc(self, ctx):
+        rows, label = await self._top_rows(ctx.guild.id, "vc")
+        await ctx.send(embed=self._leaderboard_embed(ctx.guild, rows, "vc", label))
+
+    @staticmethod
+    def _parse_hhmm(raw):
+        match = re.match(r"^(\d{1,2})[:.](\d{2})$", (raw or "").strip())
+        if not match:
+            return None
+        hour, minute = int(match.group(1)), int(match.group(2))
+        if not (0 <= hour < 24 and 0 <= minute < 60):
+            return None
+        return f"{hour:02d}:{minute:02d}"
+
+    @staticmethod
+    def _parse_weekday(raw):
+        days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        raw = (raw or "").strip().lower()
+        if raw.isdigit() and 0 <= int(raw) <= 6:
+            return int(raw)
+        return days.index(raw) if raw in days else None
+
+    @staticmethod
+    def _find_text_channel(guild, raw):
+        if guild is None or not raw:
+            return None
+        match = re.search(r"<#(\d+)>", raw)
+        if match:
+            return guild.get_channel(int(match.group(1)))
+        match = re.search(r"\d{15,25}", raw)
+        if match:
+            return guild.get_channel(int(match.group(0)))
+        return discord.utils.get(guild.text_channels, name=raw.strip().lstrip("#"))
+
+    async def _ask(self, ctx, question, timeout=90):
+        await ctx.send(question)
+
+        def check(message):
+            return message.author.id == ctx.author.id and message.channel.id == ctx.channel.id
+
+        try:
+            answer = await self.bot.wait_for("message", check=check, timeout=timeout)
+        except asyncio.TimeoutError:
+            await ctx.send("⌛ Timed out — nothing was changed.")
+            return None
+        return answer.content.strip()
+
+    @leaderboard.command(name="schedule", description="Schedule daily or weekly leaderboard posts (IST)")
+    @commands.has_permissions(manage_guild=True)
+    async def leaderboard_schedule(self, ctx, channel: Optional[discord.TextChannel] = None,
+                                   period: Optional[str] = None, day: Optional[str] = None,
+                                   time: Optional[str] = None):
+        if period and period.lower() in ("off", "disable", "stop", "none"):
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "UPDATE leaderboard_settings SET channel_id = NULL, period = NULL, weekday = NULL, time_ist = NULL, last_posted = NULL WHERE guild_id = ?",
+                    (ctx.guild.id,),
+                )
+                await db.commit()
+            await ctx.send("🛑 Scheduled leaderboard posts are now off.")
+            return
+
+        if channel is None:
+            answer = await self._ask(ctx, "📢 **Which channel?** Mention it or send its ID.")
+            if answer is None:
+                return
+            channel = self._find_text_channel(ctx.guild, answer)
+        if channel is None:
+            await ctx.send("I couldn't find that channel.")
+            return
+
+        if period is None:
+            period = await self._ask(ctx, "🗓️ **Daily or weekly?** Reply `daily` or `weekly`.")
+            if period is None:
+                return
+        period = period.lower().strip()
+        if period not in ("daily", "weekly"):
+            await ctx.send("Period must be `daily` or `weekly`.")
+            return
+
+        weekday = None
+        if period == "weekly":
+            if day is None:
+                day = await self._ask(ctx, "📅 **Which day?** Example: `monday`.")
+                if day is None:
+                    return
+            weekday = self._parse_weekday(day)
+            if weekday is None:
+                await ctx.send("That day isn't valid — use monday to sunday.")
+                return
+
+        if time is None:
+            time = await self._ask(ctx, "🕒 **What time (IST)?** Use 24-hour `HH:MM`, e.g. `20:30`.")
+            if time is None:
+                return
+        time_ist = self._parse_hhmm(time)
+        if time_ist is None:
+            await ctx.send("That time isn't valid — use 24-hour `HH:MM`, e.g. `20:30`.")
+            return
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("INSERT OR IGNORE INTO leaderboard_settings (guild_id) VALUES (?)", (ctx.guild.id,))
+            await db.execute(
+                "UPDATE leaderboard_settings SET channel_id = ?, period = ?, weekday = ?, time_ist = ?, last_posted = NULL WHERE guild_id = ?",
+                (channel.id, period, weekday, time_ist, ctx.guild.id),
+            )
+            await db.commit()
+
+        when = f"every {day.title()}" if period == "weekly" else "every day"
+        await ctx.send(f"✅ Leaderboard will post {when} at **{time_ist} IST** in {channel.mention}.")
+
+    @leaderboard.command(name="live", description="Post a leaderboard that refreshes every 30 minutes")
+    @commands.has_permissions(manage_guild=True)
+    async def leaderboard_live(self, ctx, channel: Optional[discord.TextChannel] = None,
+                               action: Optional[str] = None):
+        if action and action.lower() in ("off", "disable", "stop"):
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "UPDATE leaderboard_settings SET live_channel_id = NULL, live_message_id = NULL WHERE guild_id = ?",
+                    (ctx.guild.id,),
+                )
+                await db.commit()
+            await ctx.send("🛑 Live leaderboard updates are now off.")
+            return
+
+        channel = channel or ctx.channel
+        embeds = await self._both_leaderboard_embeds(ctx.guild)
+        message = await channel.send(embeds=embeds)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("INSERT OR IGNORE INTO leaderboard_settings (guild_id) VALUES (?)", (ctx.guild.id,))
+            await db.execute(
+                "UPDATE leaderboard_settings SET live_channel_id = ?, live_message_id = ? WHERE guild_id = ?",
+                (channel.id, message.id, ctx.guild.id),
+            )
+            await db.commit()
+        await ctx.send(f"✅ Live leaderboard started in {channel.mention} — it refreshes every 30 minutes.")
+
+    @tasks.loop(minutes=1)
+    async def schedule_loop(self):
+        await self.bot.wait_until_ready()
+        now = datetime.now(IST)
+        stamp = now.strftime("%Y-%m-%d")
+        for guild in list(self.bot.guilds):
+            try:
+                async with aiosqlite.connect(self.db_path) as db:
+                    async with db.execute(
+                        "SELECT channel_id, period, weekday, time_ist, last_posted FROM leaderboard_settings WHERE guild_id = ?",
+                        (guild.id,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                if not row:
+                    continue
+                channel_id, period, weekday, time_ist, last_posted = row
+                if not channel_id or not period or not time_ist or last_posted == stamp:
+                    continue
+                try:
+                    hour, minute = (int(part) for part in time_ist.split(":"))
+                except (ValueError, AttributeError):
+                    continue
+                now_minutes = now.hour * 60 + now.minute
+                if not 0 <= now_minutes - (hour * 60 + minute) < 10:
+                    continue
+                if period == "weekly" and weekday is not None and now.weekday() != weekday:
+                    continue
+                channel = self.bot.get_channel(channel_id)
+                if channel is None:
+                    continue
+                await channel.send(embeds=await self._both_leaderboard_embeds(guild))
+                async with aiosqlite.connect(self.db_path) as db:
+                    await db.execute(
+                        "UPDATE leaderboard_settings SET last_posted = ? WHERE guild_id = ?",
+                        (stamp, guild.id),
+                    )
+                    await db.commit()
+            except Exception as e:
+                logger.error(f"Scheduled leaderboard error for guild {guild.id}: {e}")
+
+    @tasks.loop(minutes=30)
+    async def live_loop(self):
+        await self.bot.wait_until_ready()
+        for guild in list(self.bot.guilds):
+            try:
+                async with aiosqlite.connect(self.db_path) as db:
+                    async with db.execute(
+                        "SELECT live_channel_id, live_message_id FROM leaderboard_settings WHERE guild_id = ?",
+                        (guild.id,),
+                    ) as cursor:
+                        row = await cursor.fetchone()
+                if not row:
+                    continue
+                channel_id, message_id = row
+                if not channel_id:
+                    continue
+                channel = self.bot.get_channel(channel_id)
+                if channel is None:
+                    continue
+                embeds = await self._both_leaderboard_embeds(guild)
+                message = None
+                if message_id:
+                    try:
+                        message = await channel.fetch_message(message_id)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        message = None
+                if message is None:
+                    message = await channel.send(embeds=embeds)
+                    async with aiosqlite.connect(self.db_path) as db:
+                        await db.execute(
+                            "UPDATE leaderboard_settings SET live_message_id = ? WHERE guild_id = ?",
+                            (message.id, guild.id),
+                        )
+                        await db.commit()
+                else:
+                    await message.edit(embeds=embeds)
+            except Exception as e:
+                logger.error(f"Live leaderboard error for guild {guild.id}: {e}")
+
+    @level.command(name="test", description="Preview the level-up message without granting anything")
+    @commands.has_permissions(manage_guild=True)
+    async def level_test(self, ctx):
+        """Preview the configured level-up message, embed/CV2 tokens included."""
+        settings = await self.get_guild_settings(ctx.guild.id)
+        _xp, level, _messages = await self.get_user_data(ctx.guild.id, ctx.author.id)
+        test_level = level + 1
+
+        earned = []
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT role_id FROM level_rewards WHERE guild_id = ? AND level = ?",
+                (ctx.guild.id, test_level),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row:
+            role = ctx.guild.get_role(row[0])
+            if role:
+                earned.append(role)
+
+        await self.announce_level_up(
+            ctx.guild, ctx.author, test_level, settings, ctx.channel,
+            destination=ctx.channel, earned_roles=earned,
+        )
+        await ctx.send("-# Preview only — no roles were granted and no XP changed.")
 
