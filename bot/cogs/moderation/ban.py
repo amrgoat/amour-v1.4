@@ -94,7 +94,28 @@ class Ban(commands.Cog):
             dm_status = "No"
 
         # Ban the user
-        await ctx.guild.ban(user, reason=f"Ban requested by {ctx.author} for reason: {reason or 'No reason provided'}")
+        try:
+            await ctx.guild.ban(user, reason=f"Ban requested by {ctx.author} for reason: {reason or 'No reason provided'}")
+        except discord.Forbidden as e:
+            if getattr(e, "code", None) == 60003:
+                detail = "**Two-Factor Authentication (2FA) is required** for banning, but it is **not enabled** on the bot account. Enable 2FA for the bot user (User Settings \u2192 My Account \u2192 Two-Factor Authentication) and try again."
+            else:
+                detail = "I don't have permission to ban this user. Make sure **Ban Members** is enabled for my role and that my role is placed **above** the target's role in the role list."
+            container = ui.Container()
+            container.add_item(ui.TextDisplay("\u274c **Error Banning User**"))
+            container.add_item(ui.TextDisplay(detail))
+            container.add_item(ui.TextDisplay(f"*Requested by {ctx.author}*"))
+            view = ui.LayoutView()
+            view.add_item(container)
+            return await ctx.send(view=view)
+        except discord.HTTPException as e:
+            container = ui.Container()
+            container.add_item(ui.TextDisplay("\u274c **Error Banning User**"))
+            container.add_item(ui.TextDisplay(f"Failed to ban **{user.name}**: `{e.text}`"))
+            container.add_item(ui.TextDisplay(f"*Requested by {ctx.author}*"))
+            view = ui.LayoutView()
+            view.add_item(container)
+            return await ctx.send(view=view)
 
         # Success container with Components V2
         container = ui.Container()

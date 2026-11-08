@@ -76,7 +76,7 @@ class Tracking(commands.Cog):
 
         for invite in invites_after:
             for old_invite in invites_before:
-                if invite.code == old_invite.code and invite.uses > old_invite.uses:
+                if invite.code == old_invite.code and (invite.uses or 0) > (old_invite.uses or 0):
                     inviter = invite.inviter
                     break
             if inviter:

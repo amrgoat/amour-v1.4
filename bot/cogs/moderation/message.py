@@ -49,6 +49,8 @@ async def do_removal(ctx, limit, predicate, *, before=None, after=None):
   try:
       deleted = await ctx.channel.purge(limit=limit, before=before, after=after, check=predicate)
   except discord.Forbidden as e:
+      if getattr(e, "code", None) == 60003:
+          return await ctx.error("**Two-Factor Authentication (2FA) is required** for this action, but it is **not enabled** on the bot account. Please enable 2FA for the bot user (User Settings \u2192 My Account \u2192 Two-Factor Authentication) and try again.")
       return await ctx.error("I do not have permissions to delete messages.")
   except discord.HTTPException as e:
       return await ctx.error(f"Error: {e} (try a smaller search?)")
@@ -69,6 +71,19 @@ async def do_removal(ctx, limit, predicate, *, before=None, after=None):
       await ctx.send(to_send, delete_after=7)
     
 
+async def _del_invoker(ctx):
+  """Delete the invoking command message without letting permission/2FA
+  errors crash the command."""
+  try:
+      await ctx.message.delete()
+  except discord.Forbidden as e:
+      if getattr(e, "code", None) == 60003:
+          await ctx.send("\u26a0\ufe0f **Two-Factor Authentication (2FA) is required** for this action, but it is **not enabled** on the bot account. Please enable 2FA for the bot user (User Settings \u2192 My Account \u2192 Two-Factor Authentication) and try again.", delete_after=20)
+      else:
+          await ctx.send("\u26a0\ufe0f I could not delete the command message \u2014 I may be missing permissions.", delete_after=10)
+  except discord.HTTPException:
+      pass
+
 class Message(commands.Cog):
 
   def __init__(self, bot):
@@ -83,7 +98,7 @@ class Message(commands.Cog):
   @commands.has_permissions(manage_messages=True)
   @commands.bot_has_permissions(manage_messages=True)
   async def clear(self, ctx, Choice: Union[discord.Member, int], Amount: int = None):
-        await ctx.message.delete()
+        await _del_invoker(ctx)
 
         if isinstance(Choice, discord.Member):
             search = Amount or 5
@@ -101,7 +116,7 @@ class Message(commands.Cog):
   @commands.has_permissions(manage_messages=True)
   @commands.bot_has_permissions(manage_messages=True)
   async def embeds(self, ctx, search=100):
-        await ctx.message.delete()
+        await _del_invoker(ctx)
         await do_removal(ctx, search, lambda e: len(e.embeds))
 
 
@@ -113,7 +128,7 @@ class Message(commands.Cog):
   @commands.bot_has_permissions(manage_messages=True)
   async def files(self, ctx, search=100):
 
-        await ctx.message.delete()
+        await _del_invoker(ctx)
         await do_removal(ctx, search, lambda e: len(e.attachments))
 
   @clear.command(help="Clears the messages having images")
@@ -124,7 +139,7 @@ class Message(commands.Cog):
   @commands.bot_has_permissions(manage_messages=True)
   async def images(self, ctx, search=100):
 
-        await ctx.message.delete()
+        await _del_invoker(ctx)
         await do_removal(ctx, search, lambda e: len(e.embeds) or len(e.attachments))
 
 
@@ -136,7 +151,7 @@ class Message(commands.Cog):
   @commands.bot_has_permissions(manage_messages=True)
   async def _remove_all(self, ctx, search=100):
 
-        await ctx.message.delete()
+        await _del_invoker(ctx)
         await do_removal(ctx, search, lambda e: True)
 
   @clear.command(help="Clears the messages of a specific user")
@@ -144,7 +159,7 @@ class Message(commands.Cog):
   @commands.bot_has_permissions(manage_messages=True)
   async def user(self, ctx, member: discord.Member, search=100):
 
-        await ctx.message.delete()
+        await _del_invoker(ctx)
         await do_removal(ctx, search, lambda e: e.author == member)
 
 
@@ -157,7 +172,7 @@ class Message(commands.Cog):
   @commands.bot_has_permissions(manage_messages=True)
   async def contains(self, ctx, *, string: str):
 
-        await ctx.message.delete()
+        await _del_invoker(ctx)
         if len(string) < 3:
             await ctx.error("The substring length must be at least 3 characters.")
         else:
@@ -171,7 +186,7 @@ class Message(commands.Cog):
   @commands.bot_has_permissions(manage_messages=True)
   async def _bot(self, ctx, prefix=None, search=100):
 
-        await ctx.message.delete()
+        await _del_invoker(ctx)
 
         def predicate(m):
             return (m.webhook_id is None and m.author.bot) or (prefix and m.content.startswith(prefix))
@@ -187,7 +202,7 @@ class Message(commands.Cog):
 
   async def _emoji(self, ctx, search=100):
 
-        await ctx.message.delete()
+        await _del_invoker(ctx)
         custom_emoji = re.compile(r"<a?:[a-zA-Z0-9\_]+:([0-9]+)>")
 
         def predicate(m):
@@ -203,7 +218,7 @@ class Message(commands.Cog):
   @commands.bot_has_permissions(manage_messages=True)
   async def _reactions(self, ctx, search=100):
 
-        await ctx.message.delete()
+        await _del_invoker(ctx)
 
         if search > 2000:
             return await ctx.send(f"Too many messages to search for ({search}/2000)")
@@ -229,7 +244,7 @@ class Message(commands.Cog):
   @commands.bot_has_permissions(manage_messages=True)
   async def _purgebot(self, ctx, prefix=None, search=100):
 
-    await ctx.message.delete()
+    await _del_invoker(ctx)
 
     def predicate(m):
         return (m.webhook_id is None and m.author.bot) or (prefix and m.content.startswith(prefix))
@@ -247,7 +262,7 @@ class Message(commands.Cog):
   @commands.bot_has_permissions(manage_messages=True)
   async def purguser(self, ctx, member: discord.Member, search=100):
       
-      await ctx.message.delete()
+      await _del_invoker(ctx)
       await do_removal(ctx, search, lambda e: e.author == member)
 
  
