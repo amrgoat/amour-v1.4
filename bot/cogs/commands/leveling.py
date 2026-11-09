@@ -473,6 +473,26 @@ class Leveling (commands .Cog ):
                 """)
 
                 await db .execute ("""
+                    CREATE TABLE IF NOT EXISTS vc_level_rewards (
+                        guild_id INTEGER,
+                        level INTEGER,
+                        role_id INTEGER,
+                        remove_previous INTEGER DEFAULT 0,
+                        PRIMARY KEY (guild_id, level)
+                    )
+                """)
+
+                await db .execute ("""
+                    CREATE TABLE IF NOT EXISTS vc_xp_multipliers (
+                        guild_id INTEGER,
+                        target_id INTEGER,
+                        target_type TEXT,
+                        multiplier REAL,
+                        PRIMARY KEY (guild_id, target_id, target_type)
+                    )
+                """)
+
+                await db .execute ("""
                     CREATE TABLE IF NOT EXISTS leaderboard_settings (
                         guild_id INTEGER PRIMARY KEY,
                         channel_id INTEGER,
@@ -3132,9 +3152,12 @@ class Leveling (commands .Cog ):
             logger.error("No usable channel for the VC level-up message")
             return
 
+        if earned_roles is None:
+            earned_roles = await self.give_vc_rewards(guild, member, new_level)
+
         await self._send_level_message(
             channel, guild, member, new_level,
-            settings.get('level_message'), earned_roles or [],
+            settings.get('level_message'), earned_roles,
         )
 
     async def _vc_user_data(self, guild_id, user_id):
@@ -3167,6 +3190,87 @@ class Leveling (commands .Cog ):
             logger.error(f"Error getting VC rank: {e}")
             return 1
 
+    async def get_vc_xp_multiplier(self, guild_id, user_id, channel_id):
+        """Voice XP multiplier from the VC tables, independent of chat multipliers."""
+        try:
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                return 1.0
+
+            member = guild.get_member(user_id)
+            if not member:
+                return 1.0
+
+            total_multiplier = 1.0
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT target_id, multiplier FROM vc_xp_multipliers WHERE guild_id = ? AND target_type = 'role'",
+                    (guild_id,),
+                ) as cursor:
+                    role_multipliers = await cursor.fetchall()
+
+                for role_id, multiplier in role_multipliers:
+                    if any(role.id == role_id for role in member.roles):
+                        total_multiplier *= multiplier
+
+                if channel_id:
+                    async with db.execute(
+                        "SELECT multiplier FROM vc_xp_multipliers WHERE guild_id = ? AND target_id = ? AND target_type = 'channel'",
+                        (guild_id, channel_id),
+                    ) as cursor:
+                        channel_mult = await cursor.fetchone()
+                        if channel_mult:
+                            total_multiplier *= channel_mult[0]
+
+            return total_multiplier
+        except Exception as e:
+            logger.error(f"Error getting VC XP multiplier: {e}")
+            return 1.0
+
+    async def give_vc_rewards(self, guild, member, level):
+        """Give the voice-level reward roles. Returns the roles added."""
+        granted = []
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT role_id, remove_previous FROM vc_level_rewards WHERE guild_id = ? AND level <= ? ORDER BY level DESC",
+                    (guild.id, level),
+                ) as cursor:
+                    rewards = await cursor.fetchall()
+
+            for role_id, remove_previous in rewards:
+                role = guild.get_role(role_id)
+                if role and role not in member.roles:
+                    try:
+                        await member.add_roles(role, reason=f"Voice level {level} reward")
+                        granted.append(role)
+                    except discord.Forbidden:
+                        logger.warning(f"No permission to add VC reward role {role.name} to {member}")
+                        continue
+                    except discord.HTTPException as e:
+                        logger.error(f"Failed to add VC reward role {role.name} to {member}: {e}")
+                        continue
+
+                    if remove_previous:
+                        async with aiosqlite.connect(self.db_path) as db:
+                            async with db.execute(
+                                "SELECT role_id FROM vc_level_rewards WHERE guild_id = ? AND level < ?",
+                                (guild.id, level),
+                            ) as cursor:
+                                prev_rewards = await cursor.fetchall()
+
+                        for prev_role_id, in prev_rewards:
+                            prev_role = guild.get_role(prev_role_id)
+                            if prev_role and prev_role in member.roles:
+                                try:
+                                    await member.remove_roles(prev_role, reason=f"Upgraded to voice level {level}")
+                                except discord.HTTPException as e:
+                                    logger.error(f"Failed to remove previous VC reward role {prev_role.name}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error giving VC level rewards: {e}")
+        return granted
+
     async def _award_vc_minute(self, guild, member, settings, fallback_channel=None):
         """Give one minute of voice XP, announcing a level up when it happens."""
         xp_low = int(settings.get('min_xp', 10) or 10)
@@ -3174,6 +3278,11 @@ class Leveling (commands .Cog ):
         if xp_low > xp_high:
             xp_low, xp_high = xp_high, xp_low
         xp_gain = random.randint(max(1, xp_low), max(1, xp_high))
+        multiplier = await self.get_vc_xp_multiplier(
+            guild.id, member.id, getattr(fallback_channel, 'id', None)
+        )
+        if multiplier and multiplier != 1.0:
+            xp_gain = max(1, int(round(xp_gain * multiplier)))
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 "SELECT xp, minutes FROM vc_xp WHERE guild_id = ? AND user_id = ?",
@@ -3192,9 +3301,9 @@ class Leveling (commands .Cog ):
             await db.commit()
 
         if new_level > old_level:
-            # Voice levels use their own message and never grant chat rewards.
+            # Voice levels use their own message and grant only VC rewards.
             await self.announce_vc_level_up(
-                guild, member, new_level, settings, fallback_channel, earned_roles=[]
+                guild, member, new_level, settings, fallback_channel
             )
 
     @tasks.loop(minutes=1)
@@ -3333,16 +3442,178 @@ class Leveling (commands .Cog ):
     async def vc_test(self, ctx):
         settings = await self.get_vc_settings(ctx.guild.id)
         _xp, level, _minutes = await self._vc_user_data(ctx.guild.id, ctx.author.id)
+        preview_roles = []
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT role_id FROM vc_level_rewards WHERE guild_id = ? AND level = ?",
+                (ctx.guild.id, level + 1),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if row:
+            role = ctx.guild.get_role(row[0])
+            if role:
+                preview_roles.append(role)
+
         await self.announce_vc_level_up(
             ctx.guild, ctx.author, level + 1, settings, ctx.channel,
-            destination=ctx.channel, earned_roles=[],
+            destination=ctx.channel, earned_roles=preview_roles,
         )
-        await ctx.send("-# Preview only — no XP changed.")
+        await ctx.send("-# Preview only — no roles were granted and no XP changed.")
 
     @vclevel.command(name="leaderboard", aliases=["lb"], description="Show the voice leaderboard")
     async def vc_leaderboard(self, ctx):
         rows, label = await self._top_rows(ctx.guild.id, "vc")
         await ctx.send(embed=self._leaderboard_embed(ctx.guild, rows, "vc", label))
+
+    @vclevel.group(name="rewards", invoke_without_command=True, description="Manage VC level rewards")
+    async def vc_rewards(self, ctx):
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @vc_rewards.command(name="add", description="Add a VC level reward")
+    @commands.has_permissions(administrator=True)
+    async def vc_rewards_add(self, ctx, level: int, role: discord.Role, remove_previous: bool = False):
+        if level <= 0:
+            await ctx.send("Level must be greater than 0.")
+            return
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO vc_level_rewards (guild_id, level, role_id, remove_previous) VALUES (?, ?, ?, ?)",
+                (ctx.guild.id, level, role.id, int(remove_previous)),
+            )
+            await db.commit()
+        await ctx.send(
+            f"Added VC reward {role.mention} for voice level {level} (Remove Previous: {remove_previous})"
+        )
+
+    @vc_rewards.command(name="remove", description="Remove a VC level reward")
+    @commands.has_permissions(administrator=True)
+    async def vc_rewards_remove(self, ctx, level: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM vc_level_rewards WHERE guild_id = ? AND level = ?",
+                (ctx.guild.id, level),
+            )
+            await db.commit()
+        await ctx.send(f"Removed the VC reward for voice level {level}.")
+
+    @vc_rewards.command(name="list", description="List all VC level rewards")
+    @commands.has_permissions(administrator=True)
+    async def vc_rewards_list(self, ctx):
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT level, role_id, remove_previous FROM vc_level_rewards WHERE guild_id = ? ORDER BY level",
+                (ctx.guild.id,),
+            ) as cursor:
+                rewards = await cursor.fetchall()
+
+        if not rewards:
+            await ctx.send("No VC level rewards configured.")
+            return
+
+        embed = discord.Embed(title="VC Level Rewards", color=0xFF0000, timestamp=datetime.now(IST))
+        for level, role_id, remove_previous in rewards:
+            role = ctx.guild.get_role(role_id)
+            role_name = role.mention if role else "Role not found"
+            embed.add_field(
+                name=f"Voice Level {level}",
+                value=f"Role: {role_name} (Remove Previous: {remove_previous})",
+                inline=False,
+            )
+        await ctx.send(embed=embed)
+
+    @vclevel.group(name="multiplier", invoke_without_command=True, description="Manage VC XP multipliers")
+    async def vc_multiplier(self, ctx):
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    def _resolve_vc_multiplier_target(self, guild, target_type, raw):
+        digits = re.sub(r"\D", "", raw or "")
+        if target_type == "role":
+            role = guild.get_role(int(digits)) if digits else None
+            if role is None and raw:
+                role = discord.utils.find(
+                    lambda r: r.name.lower() == raw.lstrip("@").lower(), guild.roles
+                )
+            return role
+        channel = guild.get_channel(int(digits)) if digits else None
+        if channel is None and raw:
+            channel = discord.utils.get(guild.voice_channels, name=raw.lstrip("#").lower())
+        return channel
+
+    @vc_multiplier.command(name="add", description="Add a VC XP multiplier (role or channel)")
+    @commands.has_permissions(administrator=True)
+    async def vc_multiplier_add(self, ctx, target_type: str, target: str, multiplier: float):
+        target_type = target_type.lower()
+        if target_type not in ("role", "channel"):
+            await ctx.send("Invalid target type. Must be 'role' or 'channel'.")
+            return
+        if multiplier <= 0:
+            await ctx.send("Multiplier must be greater than 0.")
+            return
+
+        resolved = self._resolve_vc_multiplier_target(ctx.guild, target_type, target)
+        if resolved is None:
+            await ctx.send(f"I couldn't find that {target_type}.")
+            return
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO vc_xp_multipliers (guild_id, target_id, target_type, multiplier) VALUES (?, ?, ?, ?)",
+                (ctx.guild.id, resolved.id, target_type, multiplier),
+            )
+            await db.commit()
+
+        await ctx.send(f"Added a **{multiplier}x** voice XP multiplier for {target_type} {resolved.mention}.")
+
+    @vc_multiplier.command(name="remove", description="Remove a VC XP multiplier")
+    @commands.has_permissions(administrator=True)
+    async def vc_multiplier_remove(self, ctx, target_type: str, target: str):
+        target_type = target_type.lower()
+        if target_type not in ("role", "channel"):
+            await ctx.send("Invalid target type. Must be 'role' or 'channel'.")
+            return
+
+        resolved = self._resolve_vc_multiplier_target(ctx.guild, target_type, target)
+        if resolved is None:
+            await ctx.send(f"I couldn't find that {target_type}.")
+            return
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM vc_xp_multipliers WHERE guild_id = ? AND target_id = ? AND target_type = ?",
+                (ctx.guild.id, resolved.id, target_type),
+            )
+            await db.commit()
+        await ctx.send(f"Removed the voice XP multiplier for {target_type} {resolved.mention}.")
+
+    @vc_multiplier.command(name="list", description="List all VC XP multipliers")
+    @commands.has_permissions(administrator=True)
+    async def vc_multiplier_list(self, ctx):
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT target_id, target_type, multiplier FROM vc_xp_multipliers WHERE guild_id = ?",
+                (ctx.guild.id,),
+            ) as cursor:
+                multipliers = await cursor.fetchall()
+
+        if not multipliers:
+            await ctx.send("No VC XP multipliers configured.")
+            return
+
+        embed = discord.Embed(title="VC XP Multipliers", color=0xFF0000, timestamp=datetime.now(IST))
+        for target_id, target_type, multiplier in multipliers:
+            if target_type == "role":
+                target_obj = ctx.guild.get_role(target_id)
+            else:
+                target_obj = ctx.guild.get_channel(target_id)
+            target_name = target_obj.mention if target_obj else "Not found"
+            embed.add_field(
+                name=f"{target_type.capitalize()}: {target_name}",
+                value=f"Multiplier: {multiplier}x",
+                inline=False,
+            )
+        await ctx.send(embed=embed)
 
     @commands.hybrid_command(name="vcleaderboard", aliases=["vclb"], description="Show the voice leaderboard")
     async def vcleaderboard_cmd(self, ctx):
