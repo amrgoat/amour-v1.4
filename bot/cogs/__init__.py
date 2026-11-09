@@ -82,6 +82,7 @@ from .zyrox.counting import _Counting
 from .zyrox.j2c import _J2C
 from .zyrox.booster import __boost 
 from .zyrox.leveling import _leveling
+from .zyrox.vclevel import _vclevel
 from .zyrox.sticky import _sticky
 from .zyrox.verify import _verify
 from .zyrox.joindm import _joindm
@@ -178,6 +179,7 @@ async def setup(bot: zyrox):
   await bot.add_cog(_J2C(bot))
   await bot.add_cog(__boost(bot))
   await bot.add_cog(_leveling(bot))
+  await bot.add_cog(_vclevel(bot))
   await bot.add_cog(_sticky(bot))
   await bot.add_cog(_verify(bot))
   await bot.add_cog(_joindm(bot))

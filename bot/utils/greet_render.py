@@ -58,6 +58,7 @@ async def send_greeting(
     bot: Any = None,
     prefix: str | None = None,
     extra: dict[str, Any] | None = None,
+    allowed_mentions: discord.AllowedMentions | None = None,
 ) -> list[discord.Message]:
     """Render the configured greeting and send it. Returns every sent message."""
     variables = build_variables(
@@ -76,7 +77,7 @@ async def send_greeting(
         if row is None:
             raise GreetingError(f"the saved layout `{name or 'unknown'}` no longer exists")
         view = build_view(row["data"], template_id=row["id"], placeholders=variables)
-        return [await destination.send(view=view)]
+        return [await destination.send(view=view, allowed_mentions=allowed_mentions)]
 
     embed_info = _loads(embed_data) if welcome_type == "embed" else {}
     raw_message = (embed_info.get("message") if embed_info else welcome_message) or ""
@@ -95,7 +96,7 @@ async def send_greeting(
             placeholders=variables,
             prefix_text=content or None,
         )
-        return [await destination.send(view=view)]
+        return [await destination.send(view=view, allowed_mentions=allowed_mentions)]
 
     # ── Embeds (the configured one, plus {embed:name} if present) ─────────
     embeds: list[discord.Embed] = []
@@ -116,4 +117,8 @@ async def send_greeting(
     if not content and not embeds:
         return []
 
-    return [await destination.send(content=content or None, embeds=embeds or None)]
+    return [await destination.send(
+        content=content or None,
+        embeds=embeds or None,
+        allowed_mentions=allowed_mentions,
+    )]

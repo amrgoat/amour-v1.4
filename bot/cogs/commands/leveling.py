@@ -86,16 +86,23 @@ class LevelConfigModal (discord .ui .Modal ,title ="Leveling System Configuratio
         self .cog =cog 
 
 
+        current_low =current_settings .get ('min_xp')or current_settings .get ('xp_per_message',20 )
+        current_high =current_settings .get ('max_xp')or current_low 
+        if current_low ==current_high :
+            current_range =str (current_low )
+        else :
+            current_range =f"{current_low}-{current_high}"
+
         self .xp_per_message =discord .ui .TextInput (
-        label ="XP per Message",
-        placeholder ="Amount of XP per message (default: 20)",
-        default =str (current_settings .get ('xp_per_message',20 )),
+        label ="Chat XP per Message (number or range)",
+        placeholder ="15-25 or 20",
+        default =current_range ,
         required =True ,
-        max_length =3 
+        max_length =7 
         )
 
         self .level_up_message =discord .ui .TextInput (
-        label ="Level Up Message",
+        label ="Level Up Message (plain text)",
         placeholder ="{user} · {level} · {earned:(role)} · {embed:name} · {cv2:name}",
         default =current_settings .get ('level_message','Congratulations {user}! You have reached level {level}!'),
         required =True ,
@@ -104,45 +111,8 @@ class LevelConfigModal (discord .ui .Modal ,title ="Leveling System Configuratio
         )
 
 
-        current_color =current_settings .get ('embed_color','#000000')
-        if isinstance (current_color ,int ):
-            current_color =f"#{current_color:06x}"
-        elif not isinstance (current_color ,str ):
-            current_color ='#000000'
-
-
-        if not current_color .startswith ('#'):
-            current_color ='#000000'
-
-        self .embed_color =discord .ui .TextInput (
-        label ="Embed Color (Hex)",
-        placeholder ="#FF0000",
-        default =current_color ,
-        required =True ,
-        max_length =7 
-        )
-
-        self .level_up_image =discord .ui .TextInput (
-        label ="Level Up Image URL (Optional)",
-        placeholder ="Direct image URL for level up embeds",
-        default =current_settings .get ('level_image',''),
-        required =False ,
-        max_length =500 
-        )
-
-        self .thumbnail_enabled =discord .ui .TextInput (
-        label ="Show User Avatar Thumbnail (true/false)",
-        placeholder ="true or false",
-        default =str (current_settings .get ('thumbnail_enabled',True )).lower (),
-        required =True ,
-        max_length =5 
-        )
-
         self .add_item (self .xp_per_message )
         self .add_item (self .level_up_message )
-        self .add_item (self .embed_color )
-        self .add_item (self .level_up_image )
-        self .add_item (self .thumbnail_enabled )
 
     async def on_submit (self ,interaction :discord .Interaction ):
         try :
@@ -153,36 +123,14 @@ class LevelConfigModal (discord .ui .Modal ,title ="Leveling System Configuratio
             await interaction .response .defer (ephemeral =True )
 
 
-            try :
-                xp_value =int (self .xp_per_message .value )
-                if xp_value <1 or xp_value >999 :
-                    raise ValueError ("XP per message must be between 1 and 999")
-            except ValueError as ve :
-                logger .error (f"XP validation error: {ve}")
-                await interaction .followup .send (f"{CROSS} Invalid XP per message value! Must be between 1 and 999.",ephemeral =True )
+            parsed_range =parse_xp_range (self .xp_per_message .value )
+            if parsed_range is None :
+                await interaction .followup .send (
+                f"{CROSS} Invalid XP value! Use a number like `20` or a range like `15-25` (each 1-999).",
+                ephemeral =True )
                 return 
-
-
-            color_value =self .embed_color .value .strip ()
-            if not color_value .startswith ('#'):
-                color_value ='#'+color_value 
-
-            if not validate_hex_color (color_value ):
-                await interaction .followup .send (f"{CROSS} Invalid hex color format! Use format like #FF0000",ephemeral =True )
-                return 
-
-            thumbnail_bool =self .thumbnail_enabled .value .lower ()in ['true','yes','1','on']
-
-
-            try :
-                embed_color_int =hex_to_int (color_value )
-            except Exception as e :
-                logger .error (f"Color conversion error: {e}")
-                embed_color_int =0 
-
-
-            image_value =self .level_up_image .value .strip ()if self .level_up_image .value and self .level_up_image .value .strip ()else None 
-
+            xp_low ,xp_high =parsed_range 
+            xp_value =xp_high 
 
             try :
                 async with aiosqlite .connect ("db/leveling.db")as db :
@@ -194,16 +142,14 @@ class LevelConfigModal (discord .ui .Modal ,title ="Leveling System Configuratio
 
                         await db .execute ("""
                             UPDATE leveling_settings 
-                            SET enabled = ?, xp_per_message = ?, level_message = ?, embed_color = ?, 
-                                level_image = ?, thumbnail_enabled = ?
+                            SET enabled = ?, xp_per_message = ?, level_message = ?, min_xp = ?, max_xp = ?
                             WHERE guild_id = ?
                         """,(
                         1 ,
                         xp_value ,
                         self .level_up_message .value ,
-                        embed_color_int ,
-                        image_value ,
-                        1 if thumbnail_bool else 0 ,
+                        xp_low ,
+                        xp_high ,
                         interaction .guild .id 
                         ))
                         logger .info (f"Updated settings for guild {interaction.guild.id}")
@@ -211,19 +157,16 @@ class LevelConfigModal (discord .ui .Modal ,title ="Leveling System Configuratio
 
                         await db .execute ("""
                             INSERT INTO leveling_settings 
-                            (guild_id, enabled, xp_per_message, level_message, embed_color, level_image, thumbnail_enabled,
-                             min_xp, max_xp, cooldown_seconds, dm_level_up, channel_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            (guild_id, enabled, xp_per_message, level_message, min_xp, max_xp,
+                             cooldown_seconds, dm_level_up, channel_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,(
                         interaction .guild .id ,
                         1 ,
                         xp_value ,
                         self .level_up_message .value ,
-                        embed_color_int ,
-                        image_value ,
-                        1 if thumbnail_bool else 0 ,
-                        15 ,
-                        25 ,
+                        xp_low ,
+                        xp_high ,
                         60 ,
                         0 ,
                         None 
@@ -239,13 +182,10 @@ class LevelConfigModal (discord .ui .Modal ,title ="Leveling System Configuratio
 
             embed =discord .Embed (
             title =f"{TICK} Leveling Configuration Updated",
-            description =f"**XP per Message:** {xp_value}\n"
-            f"**Level Up Message:** {self.level_up_message.value[:50]}{'...' if len(self.level_up_message.value) > 50 else ''}\n"
-            f"**Embed Color:** {color_value}\n"
-            f"**Level Up Image:** {'Set' if image_value else 'None'}\n"
-            f"**Thumbnail Enabled:** {thumbnail_bool}",
+            description =f"**XP per Message:** {xp_low}-{xp_high}\n"
+            f"**Level Up Message:** {self.level_up_message.value[:50]}{'...' if len(self.level_up_message.value) > 50 else ''}",
             color =0xFF0000 ,
-            timestamp =datetime .now (timezone .utc )
+            timestamp =datetime .now (IST )
             )
 
 
@@ -258,6 +198,135 @@ class LevelConfigModal (discord .ui .Modal ,title ="Leveling System Configuratio
             f"{CROSS} An unexpected error occurred: {str(e)}",
             ephemeral =True 
             )
+
+DEFAULT_VC_MESSAGE = "🎧 {user} reached voice level {level}!"
+
+
+def parse_xp_range (raw ):
+    """Parse ``20`` or ``15-25`` into ``(low, high)``."""
+    if raw is None :
+        return None 
+    text =str (raw ).strip ().replace (" ","").replace ("–","-")
+    match =re .fullmatch (r"(\d{1,3})(?:-(\d{1,3}))?",text )
+    if not match :
+        return None 
+    low =int (match .group (1 ))
+    high =int (match .group (2 ))if match .group (2 )else low 
+    if low >high :
+        low ,high =high ,low 
+    if low <1 or high >999 :
+        return None 
+    return low ,high 
+
+
+def _preview (text ,limit =80 ):
+    text =text or ""
+    return text if len (text )<=limit else text [:limit -3 ]+"..."
+
+
+def _leveling_summary (settings ):
+    low =settings .get ('min_xp')or settings .get ('xp_per_message')or 20 
+    high =settings .get ('max_xp')or low 
+    xp_text =str (low )if low ==high else f"{low}-{high}"
+    channel_id =settings .get ('channel_id')
+    channel_text =f"<#{channel_id}>"if channel_id else "Same channel as the message"
+    return (
+    f"Status: **{'Enabled' if settings.get('enabled') else 'Disabled'}**\n"
+    f"Chat XP per message: `{xp_text}`\n"
+    f"Cooldown: `{settings.get('cooldown_seconds', 60)}s`\n"
+    f"Level-up channel: {channel_text}\n"
+    f"Level-up message: `{_preview(settings.get('level_message'))}`"
+    )
+
+
+def _vc_summary (settings ):
+    low =settings .get ('min_xp',10 )
+    high =settings .get ('max_xp',20 )
+    xp_text =str (low )if low ==high else f"{low}-{high}"
+    channel_id =settings .get ('channel_id')
+    channel_text =f"<#{channel_id}>"if channel_id else "The voice channel they are in"
+    return (
+    f"Status: **{'Enabled' if settings.get('enabled') else 'Disabled'}**\n"
+    f"Voice XP per minute: `{xp_text}`\n"
+    f"Level-up channel: {channel_text}\n"
+    f"Level-up message: `{_preview(settings.get('level_message') or DEFAULT_VC_MESSAGE)}`"
+    )
+
+
+class SettingsLauncherView (discord .ui .View ):
+    """A button that opens a settings modal.
+
+    Prefix commands cannot answer with a modal directly, so they post this
+    launcher instead of asking the admin questions one message at a time.
+    """
+
+    def __init__ (self ,build_modal ):
+        super ().__init__ (timeout =180 )
+        self ._build_modal =build_modal 
+        button =discord .ui .Button (label ="Open Settings",style =discord .ButtonStyle .primary ,emoji ="⚙️")
+        button .callback =self ._open 
+        self .add_item (button )
+
+    async def _open (self ,interaction :discord .Interaction ):
+        await interaction .response .send_modal (self ._build_modal ())
+
+
+class VCConfigModal (discord .ui .Modal ,title ="VC Leveling Configuration"):
+    def __init__ (self ,cog ,current_settings ):
+        super ().__init__ ()
+        self .cog =cog 
+
+        low =current_settings .get ('min_xp',10 )
+        high =current_settings .get ('max_xp',20 )
+        xp_default =str (low )if low ==high else f"{low}-{high}"
+
+        self .xp_range =discord .ui .TextInput (
+        label ="Voice XP per minute (number or range)",
+        placeholder ="10-20 or 15",
+        default =xp_default ,
+        required =True ,
+        max_length =7 
+        )
+
+        self .level_up_message =discord .ui .TextInput (
+        label ="VC Level Up Message (plain text)",
+        placeholder ="{user} reached voice level {level}! · {embed:name} · {cv2:name}",
+        default =current_settings .get ('level_message')or DEFAULT_VC_MESSAGE ,
+        required =True ,
+        style =discord .TextStyle .paragraph ,
+        max_length =2000 
+        )
+
+        self .add_item (self .xp_range )
+        self .add_item (self .level_up_message )
+
+    async def on_submit (self ,interaction :discord .Interaction ):
+        parsed =parse_xp_range (self .xp_range .value )
+        if parsed is None :
+            await interaction .response .send_message (
+            f"{CROSS} Invalid XP value! Use `15` or a range like `10-20` (each 1-999).",
+            ephemeral =True )
+            return 
+
+        low ,high =parsed 
+        await self .cog .save_vc_settings (
+        interaction .guild .id ,
+        min_xp =low ,
+        max_xp =high ,
+        level_message =self .level_up_message .value 
+        )
+
+        xp_text =str (low )if low ==high else f"{low}-{high}"
+        embed =discord .Embed (
+        title =f"{TICK} VC Leveling Updated",
+        description =f"**Voice XP per minute:** `{xp_text}`\n"
+        f"**VC level-up message:** `{_preview(self.level_up_message.value)}`",
+        color =0x00FF00 ,
+        timestamp =datetime .now (IST )
+        )
+        await interaction .response .send_message (
+        embed =embed ,view =VariablesView (interaction .user ),ephemeral =True )
+
 
 class Leveling (commands .Cog ):
     def __init__ (self ,bot ):
@@ -389,6 +458,17 @@ class Leveling (commands .Cog ):
                         xp INTEGER DEFAULT 0,
                         minutes INTEGER DEFAULT 0,
                         PRIMARY KEY (guild_id, user_id)
+                    )
+                """)
+
+                await db .execute ("""
+                    CREATE TABLE IF NOT EXISTS vc_settings (
+                        guild_id INTEGER PRIMARY KEY,
+                        enabled INTEGER DEFAULT 1,
+                        channel_id INTEGER,
+                        level_message TEXT,
+                        min_xp INTEGER DEFAULT 10,
+                        max_xp INTEGER DEFAULT 20
                     )
                 """)
 
@@ -582,11 +662,12 @@ class Leveling (commands .Cog ):
             self .message_cooldowns [cooldown_key ]=now +timedelta (seconds =cooldown_seconds )
 
 
-            base_xp =settings .get ('xp_per_message',20 )
-            if base_xp is None :
-                base_xp =20 
-
-            final_xp =base_xp 
+            xp_low =settings .get ('min_xp')or settings .get ('xp_per_message')or 20 
+            xp_high =settings .get ('max_xp')or xp_low 
+            xp_low ,xp_high =int (xp_low ),int (xp_high )
+            if xp_low >xp_high :
+                xp_low ,xp_high =xp_high ,xp_low 
+            final_xp =random .randint (max (1 ,xp_low ),max (1 ,xp_high ))
 
 
             multiplier =await self .get_xp_multiplier (guild_id ,user_id ,channel_id )
@@ -675,88 +756,14 @@ class Leveling (commands .Cog ):
                 logger.error("No usable channel for the level-up message (set one with `level channel`)")
                 return
 
-            prefix = None
-            try:
-                config = await getConfig(guild.id)
-                prefix = config.get('prefix') if isinstance(config, dict) else None
-            except Exception:
-                prefix = None
-
             if earned_roles is None:
                 earned_roles = await self.give_level_rewards(guild, member, new_level)
                 earned_roles += await self.apply_level_roles(guild, member, new_level)
 
-            seen = set()
-            mentions = []
-            for role in earned_roles:
-                if role is not None and role.id not in seen:
-                    seen.add(role.id)
-                    mentions.append(role.mention)
-            earned_text = ", ".join(mentions)
-
-            extra = {
-                'level': str(new_level),
-                'username': member.display_name,
-                'server': guild.name,
-                'earned': earned_text,
-            }
-
-            level_message = settings.get('level_message') or 'Congratulations {user}! You have reached level {level}!'
-
-            lowered_message = level_message.lower()
-            if "{embed:" in lowered_message or "{cv2:" in lowered_message:
-                text, embed_name, cv2_name = find_template_tokens(level_message)
-                if embed_name or cv2_name:
-                    try:
-                        await send_greeting(
-                            channel,
-                            guild=guild,
-                            member=member,
-                            channel=channel,
-                            welcome_type="simple",
-                            welcome_message=level_message,
-                            bot=self.bot,
-                            prefix=prefix,
-                            extra=extra,
-                        )
-                        return
-                    except GreetingError as exc:
-                        logger.error(f"Level up template error: {exc}")
-                        level_message = text
-
-            variables = build_variables(
-                user=member,
-                guild=guild,
-                channel=channel,
-                bot=self.bot,
-                prefix=prefix,
-                extra=extra,
+            await self._send_level_message(
+                channel, guild, member, new_level,
+                settings.get('level_message'), earned_roles,
             )
-            description = render(level_message, variables, guild=guild)
-
-            embed_color = settings.get('embed_color') or '#FF0000'
-            if isinstance(embed_color, str):
-                try:
-                    embed_color = hex_to_int(embed_color)
-                except Exception:
-                    embed_color = 0xFF0000
-
-            embed = discord.Embed(
-                title="🎉 Level Up!",
-                description=description,
-                color=embed_color,
-                timestamp=datetime.now(timezone.utc),
-            )
-
-            if settings.get('thumbnail_enabled', True):
-                embed.set_thumbnail(url=member.display_avatar.url)
-
-            if settings.get('level_image'):
-                embed.set_image(url=settings['level_image'])
-
-            embed.set_footer(text=f"Level {new_level} • {guild.name}")
-
-            await channel.send(embed=embed)
 
         except Exception as e:
             logger.error(f"Error handling level up: {e}")
@@ -1636,265 +1643,61 @@ class Leveling (commands .Cog ):
         try :
             current_settings =await self .get_guild_settings (ctx .guild .id )
 
+            interaction =getattr (ctx ,'interaction',None )
+            if interaction is not None :
+                await interaction .response .send_modal (LevelConfigModal (self ,current_settings ))
+                return 
 
-            if hasattr (ctx ,'interaction')and ctx .interaction :
-                modal =LevelConfigModal (self ,current_settings )
-                await ctx .interaction .response .send_modal (modal )
-            else :
-
-                await self .interactive_setup (ctx ,current_settings )
+            embed =discord .Embed (
+            title ="⚙️ Chat Leveling Settings",
+            description ="Press the button below to open the settings popup.\n"
+            "Everything is edited in the popup — no message-by-message questions.",
+            color =0xFF0000 ,
+            timestamp =datetime .now (IST )
+            )
+            embed .add_field (name ="Current Settings",value =_leveling_summary (current_settings ),inline =False )
+            await ctx .send (
+            embed =embed ,
+            view =SettingsLauncherView (lambda :LevelConfigModal (self ,current_settings ))
+            )
 
         except Exception as e :
             logger .error (f"Error in settings command: {e}")
             pass 
 
-    async def interactive_setup (self ,ctx ,current_settings ):
-        """Interactive setup for prefix commands"""
-        try :
-            embed =discord .Embed (
-            title ="🔧 Interactive Leveling Setup",
-            description ="Let's configure your leveling system! I'll ask you a few questions.\n"
-            "Type `cancel` at any time to stop, or `skip` to keep current value.\n\n"
-            "**Current Settings:**",
-            color =0xFF0000 ,
-            timestamp =datetime .now (timezone .utc )
-            )
-
-            embed .add_field (
-            name ="Current Configuration",
-            value =f"🔧 Status: {'{TICK} Enabled' if current_settings.get('enabled', False) else '{CROSS} Disabled'}\n"
-            f"💎 XP per Message: {current_settings.get('xp_per_message', 20)}\n"
-            f"🎨 Embed Color: {current_settings.get('embed_color', '#000000')}\n"
-            f"🖼️ Thumbnail: {'{TICK} Yes' if current_settings.get('thumbnail_enabled', True) else '{CROSS} No'}\n"
-            f"📢 Level Channel: {'Set' if current_settings.get('channel_id') else 'Not set'}",
-            inline =False 
-            )
-
-            setup_msg =await ctx .send (embed =embed )
-
-            def check (m ):
-                return m .author ==ctx .author and m .channel ==ctx .channel 
-
-
-            await ctx .send ("💎 **How much XP should users get per message?** (1-999)\n"
-            f"Current: `{current_settings.get('xp_per_message', 20)}`")
-
-            try :
-                xp_msg =await self .bot .wait_for ('message',check =check ,timeout =60 )
-                if xp_msg .content .lower ()=='cancel':
-                    await ctx .send (f"{CROSS} Setup cancelled.")
-                    return 
-
-                if xp_msg .content .lower ()=='skip':
-                    xp_per_message =current_settings .get ('xp_per_message',20 )
-                else :
-                    xp_per_message =int (xp_msg .content )
-                    if xp_per_message <1 or xp_per_message >999 :
-                        await ctx .send (f"{CROSS} XP must be between 1 and 999. Using current value.")
-                        xp_per_message =current_settings .get ('xp_per_message',20 )
-            except (ValueError ,asyncio .TimeoutError ):
-                await ctx .send ("⏰ Timeout or invalid input. Using current value.")
-                xp_per_message =current_settings .get ('xp_per_message',20 )
-
-
-            current_msg =current_settings .get ('level_message','Congratulations {user}! You have reached level {level}!')
-            await ctx .send ("💬 **What should the level-up message say?**\n"
-            f"Available placeholders: `{'{user}'}`, `{'{user_name}'}`, `{'{level}'}`, `{'{server_name}'}`, `{'{earned:(role)}'}`, `{'{embed:name}'}`, `{'{cv2:name}'}`\n"
-            f"Current: `{current_msg[:100]}{'...' if len(current_msg) > 100 else ''}`")
-
-            try :
-                msg_response =await self .bot .wait_for ('message',check =check ,timeout =120 )
-                if msg_response .content .lower ()=='cancel':
-                    await ctx .send (f"{CROSS} Setup cancelled.")
-                    return 
-
-                if msg_response .content .lower ()=='skip':
-                    level_message =current_msg 
-                else :
-                    level_message =msg_response .content 
-                    if len (level_message )>2000 :
-                        await ctx .send (f"{CROSS} Message too long (max 2000 chars). Using current value.")
-                        level_message =current_msg 
-            except asyncio .TimeoutError :
-                await ctx .send ("⏰ Timeout. Using current value.")
-                level_message =current_msg 
-
-
-            current_color =current_settings .get ('embed_color','#000000')
-            await ctx .send ("🎨 **What color should the level-up embeds be?** (hex format like #FF0000)\n"
-            f"Current: `{current_color}`")
-
-            try :
-                color_msg =await self .bot .wait_for ('message',check =check ,timeout =60 )
-                if color_msg .content .lower ()=='cancel':
-                    await ctx .send (f"{CROSS} Setup cancelled.")
-                    return 
-
-                if color_msg .content .lower ()=='skip':
-                    embed_color =current_color 
-                else :
-                    color_input =color_msg .content .strip ()
-                    if not color_input .startswith ('#'):
-                        color_input ='#'+color_input 
-
-                    if validate_hex_color (color_input ):
-                        embed_color =color_input 
-                    else :
-                        await ctx .send (f"{CROSS} Invalid hex color. Using current value.")
-                        embed_color =current_color 
-            except asyncio .TimeoutError :
-                await ctx .send ("⏰ Timeout. Using current value.")
-                embed_color =current_color 
-
-
-            current_image =current_settings .get ('level_image','')
-            await ctx .send ("🖼️ **Level-up image URL** (optional, direct image link)\n"
-            f"Current: `{'Set' if current_image else 'None'}`")
-
-            try :
-                image_msg =await self .bot .wait_for ('message',check =check ,timeout =60 )
-                if image_msg .content .lower ()=='cancel':
-                    await ctx .send (f"{CROSS} Setup cancelled.")
-                    return 
-
-                if image_msg .content .lower ()=='skip':
-                    level_image =current_image 
-                else :
-                    level_image =image_msg .content .strip ()if image_msg .content .strip ()!='none'else None 
-                    if level_image and len (level_image )>500 :
-                        await ctx .send (f"{CROSS} URL too long. Using current value.")
-                        level_image =current_image 
-            except asyncio .TimeoutError :
-                await ctx .send ("⏰ Timeout. Using current value.")
-                level_image =current_image 
-
-
-            current_thumb =current_settings .get ('thumbnail_enabled',True )
-            await ctx .send ("🖼️ **Show user avatar thumbnail in level-up messages?** (yes/no)\n"
-            f"Current: `{'Yes' if current_thumb else 'No'}`")
-
-            try :
-                thumb_msg =await self .bot .wait_for ('message',check =check ,timeout =60 )
-                if thumb_msg .content .lower ()=='cancel':
-                    await ctx .send (f"{CROSS} Setup cancelled.")
-                    return 
-
-                if thumb_msg .content .lower ()=='skip':
-                    thumbnail_enabled =current_thumb 
-                else :
-                    thumbnail_enabled =thumb_msg .content .lower ()in ['yes','y','true','1','on','enable']
-            except asyncio .TimeoutError :
-                await ctx .send ("⏰ Timeout. Using current value.")
-                thumbnail_enabled =current_thumb 
-
-
-            embed_color_int =hex_to_int (embed_color )
-            level_image_final =level_image if level_image and level_image .strip ()else None 
-
-            async with aiosqlite .connect ("db/leveling.db")as db :
-
-                async with db .execute ("SELECT guild_id FROM leveling_settings WHERE guild_id = ?",(ctx .guild .id ,))as cursor :
-                    exists =await cursor .fetchone ()
-
-                if exists :
-
-                    await db .execute ("""
-                        UPDATE leveling_settings 
-                        SET enabled = 1, xp_per_message = ?, level_message = ?, embed_color = ?, 
-                            level_image = ?, thumbnail_enabled = ?
-                        WHERE guild_id = ?
-                    """,(
-                    xp_per_message ,
-                    level_message ,
-                    embed_color_int ,
-                    level_image_final ,
-                    1 if thumbnail_enabled else 0 ,
-                    ctx .guild .id 
-                    ))
-                else :
-
-                    await db .execute ("""
-                        INSERT INTO leveling_settings 
-                        (guild_id, enabled, xp_per_message, level_message, embed_color, level_image, thumbnail_enabled,
-                         min_xp, max_xp, cooldown_seconds, dm_level_up, channel_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,(
-                    ctx .guild .id ,
-                    1 ,
-                    xp_per_message ,
-                    level_message ,
-                    embed_color_int ,
-                    level_image_final ,
-                    1 if thumbnail_enabled else 0 ,
-                    15 ,
-                    25 ,
-                    60 ,
-                    0 ,
-                    None 
-                    ))
-
-                await db .commit ()
-
-
-            final_embed =discord .Embed (
-            title =f"{TICK} Leveling System Configured!",
-            description ="Your leveling system has been successfully set up with these settings:",
-            color =embed_color_int ,
-            timestamp =datetime .now (timezone .utc )
-            )
-
-            final_embed .add_field (
-            name ="📊 Configuration Summary",
-            value =f"🔧 **Status:** Enabled\n"
-            f"💎 **XP per Message:** {xp_per_message}\n"
-            f"💬 **Level-up Message:** {level_message[:50]}{'...' if len(level_message) > 50 else ''}\n"
-            f"🎨 **Embed Color:** {embed_color}\n"
-            f"🖼️ **Level-up Image:** {'Set' if level_image_final else 'None'}\n"
-            f"🖼️ **Show Thumbnail:** {'Yes' if thumbnail_enabled else 'No'}",
-            inline =False 
-            )
-
-            final_embed .add_field (
-            name ="🚀 Next Steps",
-            value ="• Use `!level channel #channel` to set announcement channel\n"
-            "• Use `!level rewards add <level> @role` to add level rewards\n"
-            "• Use `!level leaderboard` to view the server leaderboard\n"
-            "• Users will now gain XP from messages!",
-            inline =False 
-            )
-
-            view =VariablesView (ctx .author )
-            await ctx .send (embed =final_embed ,view =view )
-
-        except Exception as e :
-            logger .error (f"Error in interactive setup: {e}")
-            pass 
-
-    @level .command (name ="setxp",description ="Set XP amount per message")
+    @level .command (name ="setxp",description ="Set chat XP per message (a number like 20 or a range like 15-25)")
     @commands .has_permissions (administrator =True )
-    async def setxp (self ,ctx ,amount :int ):
-        """Set XP per message amount"""
+    async def setxp (self ,ctx ,amount :str ):
+        """Set chat XP per message, either a fixed number or a range"""
         try :
-            if amount <1 or amount >999 :
-                await ctx .send (f"{CROSS} XP per message must be between 1 and 999!")
+            parsed_range =parse_xp_range (amount )
+            if parsed_range is None :
+                await ctx .send (f"{CROSS} Use a number like `20` or a range like `15-25` (each 1-999).")
                 return 
+
+            xp_low ,xp_high =parsed_range 
+            xp_text =str (xp_low )if xp_low ==xp_high else f"{xp_low}-{xp_high}"
 
             async with aiosqlite .connect (self .db_path )as db :
                 async with db .execute ("SELECT guild_id FROM leveling_settings WHERE guild_id = ?",(ctx .guild .id ,))as cursor :
                     exists =await cursor .fetchone ()
 
                 if exists :
-                    await db .execute ("UPDATE leveling_settings SET xp_per_message = ? WHERE guild_id = ?",(amount ,ctx .guild .id ))
+                    await db .execute (
+                    "UPDATE leveling_settings SET xp_per_message = ?, min_xp = ?, max_xp = ? WHERE guild_id = ?",
+                    (xp_high ,xp_low ,xp_high ,ctx .guild .id ))
                 else :
-                    await db .execute ("INSERT INTO leveling_settings (guild_id, xp_per_message) VALUES (?, ?)",(ctx .guild .id ,amount ))
+                    await db .execute (
+                    "INSERT INTO leveling_settings (guild_id, xp_per_message, min_xp, max_xp) VALUES (?, ?, ?, ?)",
+                    (ctx .guild .id ,xp_high ,xp_low ,xp_high ))
 
                 await db .commit ()
 
             embed =discord .Embed (
             title =f"{TICK} XP Amount Updated",
-            description =f"XP per message has been set to **{amount} XP**",
+            description =f"Chat XP per message has been set to **{xp_text} XP**",
             color =0x00FF00 ,
-            timestamp =datetime .now (timezone .utc )
+            timestamp =datetime .now (IST )
             )
             await ctx .send (embed =embed )
 
@@ -1926,7 +1729,7 @@ class Leveling (commands .Cog ):
             title =f"{TICK} Level-Up Message Updated",
             description =f"Level-up message has been set to:\n```{message}```",
             color =0x00FF00 ,
-            timestamp =datetime .now (timezone .utc )
+            timestamp =datetime .now (IST )
             )
             await ctx .send (embed =embed )
 
@@ -1964,7 +1767,7 @@ class Leveling (commands .Cog ):
             title =f"{TICK} Embed Color Updated",
             description =f"Embed color has been set to **{color}**",
             color =color_int ,
-            timestamp =datetime .now (timezone .utc )
+            timestamp =datetime .now (IST )
             )
             await ctx .send (embed =embed )
 
@@ -1999,7 +1802,7 @@ class Leveling (commands .Cog ):
             title =f"{TICK} Thumbnail Setting Updated",
             description =f"User thumbnails in level-up messages: **{'Enabled' if enabled else 'Disabled'}**",
             color =0x00FF00 ,
-            timestamp =datetime .now (timezone .utc )
+            timestamp =datetime .now (IST )
             )
             await ctx .send (embed =embed )
 
@@ -2031,7 +1834,7 @@ class Leveling (commands .Cog ):
             title =f"{TICK} Cooldown Updated",
             description =f"Message cooldown has been set to **{seconds} seconds**",
             color =0x00FF00 ,
-            timestamp =datetime .now (timezone .utc )
+            timestamp =datetime .now (IST )
             )
             await ctx .send (embed =embed )
 
@@ -2099,7 +1902,7 @@ class Leveling (commands .Cog ):
                 await ctx .send ("No level rewards configured.")
                 return 
 
-            embed =discord .Embed (title ="Level Rewards",color =0xFF0000 ,timestamp =datetime .now (timezone .utc ))
+            embed =discord .Embed (title ="Level Rewards",color =0xFF0000 ,timestamp =datetime .now (IST ))
             for level ,role_id ,remove_previous in rewards :
                 role =ctx .guild .get_role (role_id )
                 role_name =role .mention if role else "Role not found"
@@ -2208,7 +2011,7 @@ class Leveling (commands .Cog ):
                 await ctx .send ("No XP multipliers configured.")
                 return 
 
-            embed =discord .Embed (title ="XP Multipliers",color =0xFF0000 ,timestamp =datetime .now (timezone .utc ))
+            embed =discord .Embed (title ="XP Multipliers",color =0xFF0000 ,timestamp =datetime .now (IST ))
             for target_id ,target_type ,multiplier in multipliers :
                 if target_type =="role":
                     role =ctx .guild .get_role (target_id )
@@ -2317,7 +2120,7 @@ class Leveling (commands .Cog ):
                 await ctx .send ("The leveling blacklist is empty.")
                 return 
 
-            embed =discord .Embed (title ="Leveling Blacklist",color =0xFF0000 ,timestamp =datetime .now (timezone .utc ))
+            embed =discord .Embed (title ="Leveling Blacklist",color =0xFF0000 ,timestamp =datetime .now (IST ))
             for target_id ,target_type in blacklisted :
                 if target_type =="role":
                     role =ctx .guild .get_role (target_id )
@@ -2404,7 +2207,7 @@ class Leveling (commands .Cog ):
                 await ctx .send ("No level roles set for this server.")
                 return 
 
-            embed =discord .Embed (title ="Level Roles",color =0xFF0000 ,timestamp =datetime .now (timezone .utc ))
+            embed =discord .Embed (title ="Level Roles",color =0xFF0000 ,timestamp =datetime .now (IST ))
             for level ,role_id in roles :
                 role =ctx .guild .get_role (role_id )
                 role_name =role .mention if role else "Role not found"
@@ -2898,7 +2701,7 @@ class Leveling (commands .Cog ):
             radius =15 ,outline =(100 ,100 ,120 ),width =2 
             )
 
-            footer_text =f"✨ Generated at {datetime.now(timezone.utc).strftime('%H:%M UTC')} • {len(top_users)} Active Members • {guild.name}"
+            footer_text =f"✨ Generated at {datetime.now(IST).strftime('%I:%M %p IST')} • {len(top_users)} Active Members • {guild.name}"
             footer_bbox =draw .textbbox ((0 ,0 ),footer_text ,font =small_font )
             footer_width =footer_bbox [2 ]-footer_bbox [0 ]
             footer_x =(width -footer_width )//2 
@@ -2963,7 +2766,7 @@ class Leveling (commands .Cog ):
         "`Congratulations {user}! You've reached level {level} in {server}!`"
         ),
         color =0x00BFFF ,
-        timestamp =datetime .now (timezone .utc )
+        timestamp =datetime .now (IST )
         )
         await ctx .send (embed =embed )
 
@@ -2996,7 +2799,7 @@ class Leveling (commands .Cog ):
             "• Use `/level channel` to set level-up announcement channel\n"
             "• Use `/level rewards add` to set up level rewards",
             color =0x00FF00 ,
-            timestamp =datetime .now (timezone .utc )
+            timestamp =datetime .now (IST )
             )
             await ctx .send (embed =embed )
 
@@ -3033,7 +2836,7 @@ class Leveling (commands .Cog ):
             "• Existing user data is preserved\n"
             "• Use `/level enable` to re-enable anytime",
             color =0xFF0000 ,
-            timestamp =datetime .now (timezone .utc )
+            timestamp =datetime .now (IST )
             )
             await ctx .send (embed =embed )
 
@@ -3073,7 +2876,7 @@ class Leveling (commands .Cog ):
             embed =discord .Embed (
             title =f"📊 Level Statistics for {member.display_name}",
             color =0xFF0000 ,
-            timestamp =datetime .now (timezone .utc )
+            timestamp =datetime .now (IST )
             )
 
 
@@ -3200,7 +3003,7 @@ class Leveling (commands .Cog ):
             description =f"Level-up messages will now be sent in {channel.mention}\n\n"
             "**Note:** Make sure the bot has permission to send messages in this channel!",
             color =0x00BFFF ,
-            timestamp =datetime .now (timezone .utc )
+            timestamp =datetime .now (IST )
             )
             await ctx .send (embed =embed )
 
@@ -3209,6 +3012,130 @@ class Leveling (commands .Cog ):
             pass
 
     # ── Voice levels ──────────────────────────────────────────────────────
+
+    async def get_vc_settings(self, guild_id):
+        """Voice leveling settings, kept separate from the chat settings."""
+        defaults = {
+            'enabled': True,
+            'channel_id': None,
+            'level_message': DEFAULT_VC_MESSAGE,
+            'min_xp': 10,
+            'max_xp': 20,
+        }
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT * FROM vc_settings WHERE guild_id = ?", (guild_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+            if row is None:
+                await self.save_vc_settings(guild_id)
+                return defaults
+            return {
+                'enabled': bool(row[1]) if len(row) > 1 else True,
+                'channel_id': row[2] if len(row) > 2 else None,
+                'level_message': (row[3] if len(row) > 3 else None) or DEFAULT_VC_MESSAGE,
+                'min_xp': row[4] if len(row) > 4 and row[4] is not None else 10,
+                'max_xp': row[5] if len(row) > 5 and row[5] is not None else 20,
+            }
+        except Exception as e:
+            logger.error(f"Error getting VC settings: {e}")
+            return defaults
+
+    async def save_vc_settings(self, guild_id, **fields):
+        allowed = ('enabled', 'channel_id', 'level_message', 'min_xp', 'max_xp')
+        updates = {key: value for key, value in fields.items() if key in allowed}
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    "INSERT OR IGNORE INTO vc_settings (guild_id) VALUES (?)", (guild_id,)
+                )
+                if updates:
+                    assignments = ", ".join(f"{name} = ?" for name in updates)
+                    await db.execute(
+                        f"UPDATE vc_settings SET {assignments} WHERE guild_id = ?",
+                        (*updates.values(), guild_id),
+                    )
+                await db.commit()
+        except Exception as e:
+            logger.error(f"Error saving VC settings: {e}")
+
+    async def _send_level_message(self, channel, guild, member, new_level, message, earned_roles=None):
+        """Send a level-up message as normal text.
+
+        ``{embed:name}`` and ``{cv2:name}`` are still supported, but the text
+        itself is always the message content and mentions never ping anyone.
+        """
+        prefix = None
+        try:
+            config = await getConfig(guild.id)
+            prefix = config.get('prefix') if isinstance(config, dict) else None
+        except Exception:
+            prefix = None
+
+        seen = set()
+        mentions = []
+        for role in earned_roles or []:
+            if role is not None and role.id not in seen:
+                seen.add(role.id)
+                mentions.append(role.mention)
+
+        extra = {
+            'level': str(new_level),
+            'username': member.display_name,
+            'server': guild.name,
+            'earned': ", ".join(mentions),
+        }
+        no_pings = discord.AllowedMentions.none()
+        template = message or "Congratulations {user}! You have reached level {level}!"
+
+        try:
+            sent = await send_greeting(
+                channel,
+                guild=guild,
+                member=member,
+                channel=channel,
+                welcome_type="simple",
+                welcome_message=template,
+                bot=self.bot,
+                prefix=prefix,
+                extra=extra,
+                allowed_mentions=no_pings,
+            )
+            if sent:
+                return
+        except GreetingError as exc:
+            logger.error(f"Level up template error: {exc}")
+
+        text, _embed_name, _cv2_name = find_template_tokens(template)
+        variables = build_variables(
+            user=member, guild=guild, channel=channel, bot=self.bot, prefix=prefix, extra=extra
+        )
+        rendered = render(text, variables, guild=guild)
+        if rendered:
+            await channel.send(rendered, allowed_mentions=no_pings)
+
+    async def announce_vc_level_up(self, guild, member, new_level, settings, fallback_channel=None,
+                                   *, destination=None, earned_roles=None):
+        """Announce a voice level up using the voice settings, never the chat ones."""
+        channel = destination
+        if channel is None:
+            channel_id = settings.get('channel_id')
+            if channel_id:
+                channel = self.bot.get_channel(channel_id)
+                if channel and not channel.permissions_for(guild.me).send_messages:
+                    logger.warning(f"No permission to send messages in the VC level channel {channel_id}")
+                    channel = None
+            if channel is None:
+                channel = fallback_channel
+        if channel is None:
+            logger.error("No usable channel for the VC level-up message")
+            return
+
+        await self._send_level_message(
+            channel, guild, member, new_level,
+            settings.get('level_message'), earned_roles or [],
+        )
 
     async def _vc_user_data(self, guild_id, user_id):
         """Return (xp, level, minutes) for a member's voice activity."""
@@ -3242,7 +3169,11 @@ class Leveling (commands .Cog ):
 
     async def _award_vc_minute(self, guild, member, settings, fallback_channel=None):
         """Give one minute of voice XP, announcing a level up when it happens."""
-        xp_gain = max(1, int(settings.get('xp_per_message', 20) or 20))
+        xp_low = int(settings.get('min_xp', 10) or 10)
+        xp_high = int(settings.get('max_xp', 20) or xp_low)
+        if xp_low > xp_high:
+            xp_low, xp_high = xp_high, xp_low
+        xp_gain = random.randint(max(1, xp_low), max(1, xp_high))
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
                 "SELECT xp, minutes FROM vc_xp WHERE guild_id = ? AND user_id = ?",
@@ -3261,8 +3192,8 @@ class Leveling (commands .Cog ):
             await db.commit()
 
         if new_level > old_level:
-            # Voice levels do not grant the chat reward roles.
-            await self.announce_level_up(
+            # Voice levels use their own message and never grant chat rewards.
+            await self.announce_vc_level_up(
                 guild, member, new_level, settings, fallback_channel, earned_roles=[]
             )
 
@@ -3271,7 +3202,7 @@ class Leveling (commands .Cog ):
         await self.bot.wait_until_ready()
         for guild in list(self.bot.guilds):
             try:
-                settings = await self.get_guild_settings(guild.id)
+                settings = await self.get_vc_settings(guild.id)
                 if not settings.get('enabled'):
                     continue
                 afk_id = guild.afk_channel.id if guild.afk_channel else None
@@ -3309,7 +3240,7 @@ class Leveling (commands .Cog ):
         embed = discord.Embed(
             title=f"📊 {title} — {member.display_name}",
             color=0xFF0000,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(IST),
         )
         embed.add_field(name="Level", value=f"{level:,}", inline=True)
         embed.add_field(name="XP", value=f"{xp:,}", inline=True)
@@ -3331,9 +3262,92 @@ class Leveling (commands .Cog ):
     async def rankchat(self, ctx, member: Optional[discord.Member] = None):
         await self._send_rank(ctx, member or ctx.author, "chat")
 
-    @commands.hybrid_command(name="vclevel", aliases=["vl"], description="Show voice level and rank")
+    @commands.hybrid_group(name="vclevel", aliases=["vl"], invoke_without_command=True,
+                           description="Voice level, rank and setup")
     async def vclevel(self, ctx, member: Optional[discord.Member] = None):
-        await self._send_rank(ctx, member or ctx.author, "vc")
+        if ctx.invoked_subcommand is None:
+            await self._send_rank(ctx, member or ctx.author, "vc")
+
+    @vclevel.command(name="settings", description="Open the VC leveling setup popup")
+    @commands.has_permissions(administrator=True)
+    async def vc_settings(self, ctx):
+        try:
+            current = await self.get_vc_settings(ctx.guild.id)
+            interaction = getattr(ctx, 'interaction', None)
+            if interaction is not None:
+                await interaction.response.send_modal(VCConfigModal(self, current))
+                return
+            embed = discord.Embed(
+                title="⚙️ VC Leveling Settings",
+                description="Press the button below to open the popup.\n"
+                            "Voice XP, the VC level-up text and the channel are all edited there.",
+                color=0xFF0000,
+                timestamp=datetime.now(IST),
+            )
+            embed.add_field(name="Current Settings", value=_vc_summary(current), inline=False)
+            await ctx.send(embed=embed, view=SettingsLauncherView(lambda: VCConfigModal(self, current)))
+        except Exception as e:
+            logger.error(f"Error in VC settings command: {e}")
+
+    @vclevel.command(name="channel", description="Set the VC level-up channel")
+    @commands.has_permissions(administrator=True)
+    async def vc_channel(self, ctx, channel: discord.TextChannel):
+        await self.save_vc_settings(ctx.guild.id, channel_id=channel.id)
+        await ctx.send(f"✅ VC level-up messages will now be sent in {channel.mention}.")
+
+    @vclevel.command(name="setxp", description="Set voice XP per minute (a number or a range like 10-20)")
+    @commands.has_permissions(administrator=True)
+    async def vc_setxp(self, ctx, amount: str):
+        parsed = parse_xp_range(amount)
+        if parsed is None:
+            await ctx.send(f"{CROSS} Use a number like `15` or a range like `10-20` (each 1-999).")
+            return
+        low, high = parsed
+        await self.save_vc_settings(ctx.guild.id, min_xp=low, max_xp=high)
+        xp_text = str(low) if low == high else f"{low}-{high}"
+        await ctx.send(f"✅ Voice XP per minute is now **{xp_text}**.")
+
+    @vclevel.command(name="setmessage", description="Set the VC level-up text message")
+    @commands.has_permissions(administrator=True)
+    async def vc_setmessage(self, ctx, *, message: str):
+        if len(message) > 2000:
+            await ctx.send(f"{CROSS} The VC level-up message must be under 2000 characters.")
+            return
+        await self.save_vc_settings(ctx.guild.id, level_message=message)
+        await ctx.send(f"✅ VC level-up message set to:\n```{message}```")
+
+    @vclevel.command(name="enable", description="Enable voice leveling")
+    @commands.has_permissions(administrator=True)
+    async def vc_enable(self, ctx):
+        await self.save_vc_settings(ctx.guild.id, enabled=1)
+        await ctx.send("✅ Voice leveling is now **enabled**.")
+
+    @vclevel.command(name="disable", description="Disable voice leveling")
+    @commands.has_permissions(administrator=True)
+    async def vc_disable(self, ctx):
+        await self.save_vc_settings(ctx.guild.id, enabled=0)
+        await ctx.send("🛑 Voice leveling is now **disabled**.")
+
+    @vclevel.command(name="test", description="Preview the VC level-up message")
+    @commands.has_permissions(manage_guild=True)
+    async def vc_test(self, ctx):
+        settings = await self.get_vc_settings(ctx.guild.id)
+        _xp, level, _minutes = await self._vc_user_data(ctx.guild.id, ctx.author.id)
+        await self.announce_vc_level_up(
+            ctx.guild, ctx.author, level + 1, settings, ctx.channel,
+            destination=ctx.channel, earned_roles=[],
+        )
+        await ctx.send("-# Preview only — no XP changed.")
+
+    @vclevel.command(name="leaderboard", aliases=["lb"], description="Show the voice leaderboard")
+    async def vc_leaderboard(self, ctx):
+        rows, label = await self._top_rows(ctx.guild.id, "vc")
+        await ctx.send(embed=self._leaderboard_embed(ctx.guild, rows, "vc", label))
+
+    @commands.hybrid_command(name="vcleaderboard", aliases=["vclb"], description="Show the voice leaderboard")
+    async def vcleaderboard_cmd(self, ctx):
+        rows, label = await self._top_rows(ctx.guild.id, "vc")
+        await ctx.send(embed=self._leaderboard_embed(ctx.guild, rows, "vc", label))
 
     @commands.hybrid_command(name="rankvc", aliases=["rv"], description="Show a basic voice rank")
     async def rankvc(self, ctx, member: Optional[discord.Member] = None):
@@ -3369,7 +3383,7 @@ class Leveling (commands .Cog ):
             title=f"🏆 {title} — {guild.name}",
             description="\n".join(lines) if lines else "No data yet — start chatting or join a voice channel!",
             color=0xFF0000,
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(IST),
         )
         embed.set_footer(text=f"Top {limit} • {datetime.now(IST).strftime('%d %b %Y, %I:%M %p IST')}")
         return embed

@@ -1,7 +1,10 @@
 import discord
 from utils.emoji import ERROR
 from discord.ext import commands
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30), name="IST")
+
 
 class Snipe(commands.Cog):
     def __init__(self, bot):
@@ -15,12 +18,12 @@ class Snipe(commands.Cog):
         # Ignore messages from bots or from DMs
         if message.author.bot or not message.guild:
             return
-        
-        # Store the message details
+
+        # Store the message details (IST, so the time matches the server's clock)
         self.sniped_messages[message.channel.id] = {
             'content': message.content,
             'author': message.author,
-            'deleted_at': datetime.utcnow()
+            'deleted_at': datetime.now(IST)
         }
 
     @commands.command(name='snipe', help="Shows the most recently deleted message in the channel.")
@@ -44,8 +47,8 @@ class Snipe(commands.Cog):
                 timestamp=deleted_at
             )
             embed.set_author(name=f"Sniped message from {author.name}", icon_url=author.display_avatar.url)
-            embed.set_footer(text="Deleted at") # The timestamp is automatically formatted in the footer
-            
+            embed.set_footer(text=f"Deleted at {deleted_at.strftime('%d %b %Y, %I:%M:%S %p')} IST")
+
             await ctx.send(embed=embed)
         else:
             # Send an error message if no message is stored for this channel
@@ -54,6 +57,7 @@ class Snipe(commands.Cog):
                 color=0xFF0000
             )
             await ctx.send(embed=embed)
+
 
 async def setup(bot):
     await bot.add_cog(Snipe(bot))
