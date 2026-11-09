@@ -408,7 +408,7 @@ class LeaderboardScheduleModal (discord .ui .Modal ,title ="Leaderboard Schedule
 
 
 class LeaderboardLiveModal (discord .ui .Modal ,title ="Live Leaderboard"):
-    def __init__ (self ,cog ,guild ,fallback_channel ,channel =None ):
+    def __init__ (self ,cog ,guild ,fallback_channel ,interval =30 ):
         super ().__init__ ()
         self .cog =cog 
         self .guild =guild 
@@ -416,11 +416,18 @@ class LeaderboardLiveModal (discord .ui .Modal ,title ="Live Leaderboard"):
         self .channel =discord .ui .TextInput (
         label ="Channel (#name or ID, blank = this one)",
         placeholder ="#leaderboard",
-        default =channel ,
         required =False ,
         max_length =100 
         )
+        self .interval =discord .ui .TextInput (
+        label ="Refresh interval in minutes (1-1440)",
+        placeholder ="30",
+        default =str (interval ),
+        required =True ,
+        max_length =4 
+        )
         self .add_item (self .channel )
+        self .add_item (self .interval )
 
     async def on_submit (self ,interaction :discord .Interaction ):
         await interaction .response .defer (ephemeral =True )
@@ -431,9 +438,20 @@ class LeaderboardLiveModal (discord .ui .Modal ,title ="Live Leaderboard"):
             await interaction .followup .send (f"{CROSS} I couldn't find that channel.",ephemeral =True )
             return 
 
-        await self .cog .start_live_leaderboard (self .guild ,channel )
+        try :
+            minutes =int ((self .interval .value or "30").strip ())
+        except ValueError :
+            minutes =0 
+        if minutes <1 or minutes >1440 :
+            await interaction .followup .send (
+            f"{CROSS} The interval must be a whole number of minutes between 1 and 1440.",ephemeral =True )
+            return 
+
+        interval =self .cog ._clamp_interval (minutes )
+        await self .cog .start_live_leaderboard (self .guild ,channel ,interval )
+        plural ="" if interval ==1 else "s"
         await interaction .followup .send (
-        f"✅ Live leaderboard started in {channel.mention} — it refreshes every 30 minutes (chat + VC).",
+        f"✅ Live leaderboard started in {channel.mention} — it refreshes every {interval} minute{plural} (chat + VC).",
         ephemeral =True )
 
 
@@ -643,11 +661,21 @@ class Leveling (commands .Cog ):
                         time_ist TEXT,
                         last_posted TEXT,
                         live_channel_id INTEGER,
-                        live_message_id INTEGER
+                        live_message_id INTEGER,
+                        live_interval INTEGER DEFAULT 30,
+                        live_last_posted TEXT
                     )
                 """)
 
                 await db .commit ()
+                for column, ddl in (("live_interval", "INTEGER DEFAULT 30"), ("live_last_posted", "TEXT")):
+                    async with db.cursor() as cursor:
+                        await cursor.execute("PRAGMA table_info(leaderboard_settings)")
+                        existing_columns = [col[1] for col in await cursor.fetchall()]
+                        if column not in existing_columns:
+                            await cursor.execute(f"ALTER TABLE leaderboard_settings ADD COLUMN {column} {ddl}")
+                            logger.info(f"Added {column} column to leaderboard_settings table")
+
         except Exception as e :
             logger .error (f"Database initialization error: {e}")
 
@@ -3917,27 +3945,52 @@ class Leveling (commands .Cog ):
             when = "every day"
         return f"<#{channel_id}> — {when} at **{time_ist} IST**."
 
-    async def start_live_leaderboard(self, guild, channel):
+    @staticmethod
+    def _clamp_interval(minutes):
+        try:
+            value = int(minutes)
+        except (TypeError, ValueError):
+            return 30
+        return max(1, min(value, 1440))
+
+    async def get_live_interval(self, guild_id):
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT live_interval FROM leaderboard_settings WHERE guild_id = ?", (guild_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        return self._clamp_interval(row[0] if row and row[0] is not None else 30)
+
+    async def start_live_leaderboard(self, guild, channel, interval=None):
         embeds = await self._both_leaderboard_embeds(guild)
         message = await channel.send(embeds=embeds)
+        stamp = datetime.now(IST).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("INSERT OR IGNORE INTO leaderboard_settings (guild_id) VALUES (?)", (guild.id,))
-            await db.execute(
-                "UPDATE leaderboard_settings SET live_channel_id = ?, live_message_id = ? WHERE guild_id = ?",
-                (channel.id, message.id, guild.id),
-            )
+            if interval is None:
+                await db.execute(
+                    "UPDATE leaderboard_settings SET live_channel_id = ?, live_message_id = ?, live_last_posted = ? WHERE guild_id = ?",
+                    (channel.id, message.id, stamp, guild.id),
+                )
+            else:
+                await db.execute(
+                    "UPDATE leaderboard_settings SET live_channel_id = ?, live_message_id = ?, live_interval = ?, live_last_posted = ? WHERE guild_id = ?",
+                    (channel.id, message.id, self._clamp_interval(interval), stamp, guild.id),
+                )
             await db.commit()
         return message
 
     async def _live_summary(self, guild_id):
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
-                "SELECT live_channel_id FROM leaderboard_settings WHERE guild_id = ?", (guild_id,)
+                "SELECT live_channel_id, live_interval FROM leaderboard_settings WHERE guild_id = ?", (guild_id,)
             ) as cursor:
                 row = await cursor.fetchone()
         if not row or not row[0]:
             return "Not running."
-        return f"Updating every 30 minutes in <#{row[0]}>."
+        interval = self._clamp_interval(row[1] if len(row) > 1 else 30)
+        plural = "" if interval == 1 else "s"
+        return f"Updating every {interval} minute{plural} in <#{row[0]}>."
 
     @leaderboard.command(name="schedule", description="Schedule daily or weekly leaderboard posts (IST)")
     @commands.has_permissions(manage_guild=True)
@@ -3996,28 +4049,33 @@ class Leveling (commands .Cog ):
         embed.add_field(name="Current", value=await self._schedule_summary(ctx.guild.id), inline=False)
         await ctx.send(embed=embed, view=SettingsLauncherView(build_modal, label="Set Schedule", emoji="🗓️"))
 
-    @leaderboard.command(name="live", description="Post a leaderboard that refreshes every 30 minutes")
+    @leaderboard.command(name="live", description="Post a leaderboard that refreshes on a configurable interval")
     @commands.has_permissions(manage_guild=True)
     async def leaderboard_live(self, ctx, channel: Optional[discord.TextChannel] = None,
-                               action: Optional[str] = None):
+                               action: Optional[str] = None, interval: Optional[int] = None):
         if action and action.lower() in ("off", "disable", "stop"):
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
-                    "UPDATE leaderboard_settings SET live_channel_id = NULL, live_message_id = NULL WHERE guild_id = ?",
+                    "UPDATE leaderboard_settings SET live_channel_id = NULL, live_message_id = NULL, live_last_posted = NULL WHERE guild_id = ?",
                     (ctx.guild.id,),
                 )
                 await db.commit()
             await ctx.send("🛑 Live leaderboard updates are now off.")
             return
 
-        # A channel was given on the command line: start it right away.
+        # `leaderboard live #chan 15` passes the interval through the action slot.
+        if interval is None and action and action.strip().isdigit():
+            interval = int(action)
+
         if channel is not None:
-            await self.start_live_leaderboard(ctx.guild, channel)
-            await ctx.send(f"✅ Live leaderboard started in {channel.mention} — it refreshes every 30 minutes (chat + VC).")
+            minutes = await self.get_live_interval(ctx.guild.id) if interval is None else self._clamp_interval(interval)
+            await self.start_live_leaderboard(ctx.guild, channel, interval)
+            plural = "" if minutes == 1 else "s"
+            await ctx.send(f"✅ Live leaderboard started in {channel.mention} — it refreshes every {minutes} minute{plural} (chat + VC).")
             return
 
-        # Otherwise pick the channel in a popup instead of chat questions.
-        build_modal = lambda: LeaderboardLiveModal(self, ctx.guild, ctx.channel)
+        current_interval = await self.get_live_interval(ctx.guild.id)
+        build_modal = lambda: LeaderboardLiveModal(self, ctx.guild, ctx.channel, current_interval)
 
         interaction = getattr(ctx, 'interaction', None)
         if interaction is not None:
@@ -4026,13 +4084,38 @@ class Leveling (commands .Cog ):
 
         embed = discord.Embed(
             title="📡 Live Leaderboard",
-            description="Press the button below to choose the channel in a popup.\n"
-                        "The panel refreshes every 30 minutes and shows the chat and VC leaderboards.",
+            description="Press the button below to pick the channel and refresh interval in a popup.\n"
+                        "The panel shows the chat and VC leaderboards.",
             color=0xFF0000,
             timestamp=datetime.now(IST),
         )
         embed.add_field(name="Current", value=await self._live_summary(ctx.guild.id), inline=False)
         await ctx.send(embed=embed, view=SettingsLauncherView(build_modal, label="Start Live Panel", emoji="📡"))
+
+    @leaderboard.command(name="liveinterval", aliases=["liveint"], description="Change how often the live leaderboard refreshes")
+    @commands.has_permissions(manage_guild=True)
+    async def leaderboard_live_interval(self, ctx, minutes: int):
+        if minutes < 1 or minutes > 1440:
+            await ctx.send(f"{CROSS} The interval must be between 1 and 1440 minutes.")
+            return
+
+        value = self._clamp_interval(minutes)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT live_channel_id FROM leaderboard_settings WHERE guild_id = ?", (ctx.guild.id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            if not row or not row[0]:
+                await ctx.send("No live leaderboard is running — start one with `leaderboard live`.")
+                return
+            await db.execute(
+                "UPDATE leaderboard_settings SET live_interval = ?, live_last_posted = ? WHERE guild_id = ?",
+                (value, datetime.now(IST).isoformat(), ctx.guild.id),
+            )
+            await db.commit()
+
+        plural = "" if value == 1 else "s"
+        await ctx.send(f"✅ Live leaderboard now refreshes every {value} minute{plural}.")
 
     @tasks.loop(minutes=1)
     async def schedule_loop(self):
@@ -4074,25 +4157,41 @@ class Leveling (commands .Cog ):
             except Exception as e:
                 logger.error(f"Scheduled leaderboard error for guild {guild.id}: {e}")
 
-    @tasks.loop(minutes=30)
+    @tasks.loop(minutes=1)
     async def live_loop(self):
         await self.bot.wait_until_ready()
+        now = datetime.now(IST)
         for guild in list(self.bot.guilds):
             try:
                 async with aiosqlite.connect(self.db_path) as db:
                     async with db.execute(
-                        "SELECT live_channel_id, live_message_id FROM leaderboard_settings WHERE guild_id = ?",
+                        "SELECT live_channel_id, live_message_id, live_interval, live_last_posted FROM leaderboard_settings WHERE guild_id = ?",
                         (guild.id,),
                     ) as cursor:
                         row = await cursor.fetchone()
-                if not row:
+                if not row or not row[0]:
                     continue
-                channel_id, message_id = row
-                if not channel_id:
-                    continue
+
+                channel_id = row[0]
+                message_id = row[1]
+                interval = self._clamp_interval(row[2] if len(row) > 2 else 30)
+                last_posted = row[3] if len(row) > 3 else None
+
+                if last_posted:
+                    try:
+                        last = datetime.fromisoformat(last_posted)
+                    except ValueError:
+                        last = None
+                    if last is not None:
+                        if last.tzinfo is None:
+                            last = last.replace(tzinfo=IST)
+                        if (now - last).total_seconds() < interval * 60:
+                            continue
+
                 channel = self.bot.get_channel(channel_id)
                 if channel is None:
                     continue
+
                 embeds = await self._both_leaderboard_embeds(guild)
                 message = None
                 if message_id:
@@ -4102,79 +4201,17 @@ class Leveling (commands .Cog ):
                         message = None
                 if message is None:
                     message = await channel.send(embeds=embeds)
-                    async with aiosqlite.connect(self.db_path) as db:
-                        await db.execute(
-                            "UPDATE leaderboard_settings SET live_message_id = ? WHERE guild_id = ?",
-                            (message.id, guild.id),
-                        )
-                        await db.commit()
                 else:
                     await message.edit(embeds=embeds)
+
+                async with aiosqlite.connect(self.db_path) as db:
+                    await db.execute(
+                        "UPDATE leaderboard_settings SET live_message_id = ?, live_last_posted = ? WHERE guild_id = ?",
+                        (message.id, now.isoformat(), guild.id),
+                    )
+                    await db.commit()
             except Exception as e:
                 logger.error(f"Live leaderboard error for guild {guild.id}: {e}")
-
-    async def build_chat_overview(self, guild):
-        """Settings, rewards, level roles and multipliers for chat leveling."""
-        settings = await self.get_guild_settings(guild.id)
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                "SELECT level, role_id, remove_previous FROM level_rewards WHERE guild_id = ? ORDER BY level",
-                (guild.id,),
-            ) as cursor:
-                rewards = await cursor.fetchall()
-            async with db.execute(
-                "SELECT level, role_id FROM level_roles WHERE guild_id = ? ORDER BY level",
-                (guild.id,),
-            ) as cursor:
-                level_roles = await cursor.fetchall()
-            async with db.execute(
-                "SELECT target_id, target_type, multiplier FROM xp_multipliers WHERE guild_id = ?",
-                (guild.id,),
-            ) as cursor:
-                multipliers = await cursor.fetchall()
-
-        embed = discord.Embed(
-            title="\U0001F4AC Chat Leveling Overview",
-            description=_leveling_summary(settings),
-            color=0xFF0000,
-            timestamp=datetime.now(IST),
-        )
-        embed.add_field(name="Rewards", value=_reward_lines(guild, rewards) or "None configured.", inline=False)
-        embed.add_field(name="Level Roles", value=_level_role_lines(guild, level_roles) or "None configured.", inline=False)
-        embed.add_field(name="XP Multipliers", value=_multiplier_lines(guild, multipliers) or "None configured.", inline=False)
-        embed.set_footer(text=f"{guild.name} \u2022 chat levels")
-        return embed
-
-    async def build_vc_overview(self, guild):
-        """Settings, rewards and multipliers for voice leveling."""
-        settings = await self.get_vc_settings(guild.id)
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                "SELECT level, role_id, remove_previous FROM vc_level_rewards WHERE guild_id = ? ORDER BY level",
-                (guild.id,),
-            ) as cursor:
-                rewards = await cursor.fetchall()
-            async with db.execute(
-                "SELECT target_id, target_type, multiplier FROM vc_xp_multipliers WHERE guild_id = ?",
-                (guild.id,),
-            ) as cursor:
-                multipliers = await cursor.fetchall()
-
-        embed = discord.Embed(
-            title="\U0001F50A VC Leveling Overview",
-            description=_vc_summary(settings),
-            color=0xFF0000,
-            timestamp=datetime.now(IST),
-        )
-        embed.add_field(name="Rewards", value=_reward_lines(guild, rewards) or "None configured.", inline=False)
-        embed.add_field(name="XP Multipliers", value=_multiplier_lines(guild, multipliers) or "None configured.", inline=False)
-        embed.set_footer(text=f"{guild.name} \u2022 voice levels")
-        return embed
-
-    @level .command (name ="overview", description ="Show chat leveling settings, rewards and multipliers in one panel")
-    @commands .has_permissions (manage_guild =True )
-    async def level_overview (self ,ctx ):
-        await ctx .send (embed =await self .build_chat_overview (ctx .guild ))
 
     @level.command(name="test", description="Preview the level-up message without granting anything")
     @commands.has_permissions(manage_guild=True)

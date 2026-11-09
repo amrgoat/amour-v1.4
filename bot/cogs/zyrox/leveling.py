@@ -20,7 +20,7 @@ class _leveling(commands.Cog):
         """__**Chat Rank**__
 `chatlevel` , `rankchat`
 __**Leaderboards**__
-`leaderboard` , `leaderboard chat` , `leaderboard schedule` , `leaderboard live`
+`leaderboard` , `leaderboard chat` , `leaderboard schedule` , `leaderboard live` , `leaderboard liveinterval`
 __**XP Settings**__
 `level` , `level settings` , `level setxp` , `level setmessage` , `level setcolor` , `level thumbnail` , `level cooldown` , `level channel` , `level enable` , `level disable`
 __**Rewards & Roles**__
