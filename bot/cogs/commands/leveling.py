@@ -260,10 +260,10 @@ class SettingsLauncherView (discord .ui .View ):
     launcher instead of asking the admin questions one message at a time.
     """
 
-    def __init__ (self ,build_modal ):
+    def __init__ (self ,build_modal ,label ="Open Settings",emoji ="⚙️"):
         super ().__init__ (timeout =180 )
         self ._build_modal =build_modal 
-        button =discord .ui .Button (label ="Open Settings",style =discord .ButtonStyle .primary ,emoji ="⚙️")
+        button =discord .ui .Button (label =label ,style =discord .ButtonStyle .primary ,emoji =emoji )
         button .callback =self ._open 
         self .add_item (button )
 
@@ -326,6 +326,115 @@ class VCConfigModal (discord .ui .Modal ,title ="VC Leveling Configuration"):
         )
         await interaction .response .send_message (
         embed =embed ,view =VariablesView (interaction .user ),ephemeral =True )
+
+
+DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+class LeaderboardScheduleModal (discord .ui .Modal ,title ="Leaderboard Schedule (IST)"):
+    def __init__ (self ,cog ,guild ,channel =None ,period =None ,day =None ,time =None ):
+        super ().__init__ ()
+        self .cog =cog 
+        self .guild =guild 
+
+        self .channel =discord .ui .TextInput (
+        label ="Channel (#name or ID)",
+        placeholder ="#leaderboard",
+        default =channel ,
+        required =True ,
+        max_length =100 
+        )
+        self .period =discord .ui .TextInput (
+        label ="Period (daily or weekly)",
+        placeholder ="daily",
+        default =period or "daily",
+        required =True ,
+        max_length =10 
+        )
+        self .day =discord .ui .TextInput (
+        label ="Day (weekly only)",
+        placeholder ="monday",
+        default =day ,
+        required =False ,
+        max_length =10 
+        )
+        self .time =discord .ui .TextInput (
+        label ="Time in IST (24h HH:MM)",
+        placeholder ="20:30",
+        default =time ,
+        required =True ,
+        max_length =5 
+        )
+
+        for item in (self .channel ,self .period ,self .day ,self .time ):
+            self .add_item (item )
+
+    async def on_submit (self ,interaction :discord .Interaction ):
+        await interaction .response .defer (ephemeral =True )
+
+        channel =self .cog ._find_text_channel (self .guild ,self .channel .value )
+        if channel is None :
+            await interaction .followup .send (f"{CROSS} I couldn't find that channel.",ephemeral =True )
+            return 
+
+        period =(self .period .value or "").strip ().lower ()
+        if period not in ("daily","weekly"):
+            await interaction .followup .send (f"{CROSS} Period must be `daily` or `weekly`.",ephemeral =True )
+            return 
+
+        weekday =None 
+        if period =="weekly":
+            weekday =self .cog ._parse_weekday (self .day .value )
+            if weekday is None :
+                await interaction .followup .send (
+                f"{CROSS} For a weekly schedule the day must be monday to sunday.",ephemeral =True )
+                return 
+
+        time_ist =self .cog ._parse_hhmm (self .time .value )
+        if time_ist is None :
+            await interaction .followup .send (
+            f"{CROSS} That time isn't valid — use 24-hour `HH:MM`, e.g. `20:30`.",ephemeral =True )
+            return 
+
+        await self .cog .save_leaderboard_schedule (self .guild .id ,channel .id ,period ,weekday ,time_ist )
+
+        embed =discord .Embed (
+        title =f"{TICK} Leaderboard Schedule Saved",
+        description =self .cog ._schedule_confirmation (channel ,period ,weekday ,time_ist ),
+        color =0x00FF00 ,
+        timestamp =datetime .now (IST )
+        )
+        await interaction .followup .send (embed =embed ,ephemeral =True )
+
+
+class LeaderboardLiveModal (discord .ui .Modal ,title ="Live Leaderboard"):
+    def __init__ (self ,cog ,guild ,fallback_channel ,channel =None ):
+        super ().__init__ ()
+        self .cog =cog 
+        self .guild =guild 
+        self .fallback_channel =fallback_channel 
+        self .channel =discord .ui .TextInput (
+        label ="Channel (#name or ID, blank = this one)",
+        placeholder ="#leaderboard",
+        default =channel ,
+        required =False ,
+        max_length =100 
+        )
+        self .add_item (self .channel )
+
+    async def on_submit (self ,interaction :discord .Interaction ):
+        await interaction .response .defer (ephemeral =True )
+
+        raw =(self .channel .value or "").strip ()
+        channel =self .cog ._find_text_channel (self .guild ,raw )if raw else self .fallback_channel 
+        if channel is None :
+            await interaction .followup .send (f"{CROSS} I couldn't find that channel.",ephemeral =True )
+            return 
+
+        await self .cog .start_live_leaderboard (self .guild ,channel )
+        await interaction .followup .send (
+        f"✅ Live leaderboard started in {channel.mention} — it refreshes every 30 minutes (chat + VC).",
+        ephemeral =True )
 
 
 class Leveling (commands .Cog ):
@@ -3712,18 +3821,60 @@ class Leveling (commands .Cog ):
             return guild.get_channel(int(match.group(0)))
         return discord.utils.get(guild.text_channels, name=raw.strip().lstrip("#"))
 
-    async def _ask(self, ctx, question, timeout=90):
-        await ctx.send(question)
+    async def save_leaderboard_schedule(self, guild_id, channel_id, period, weekday, time_ist):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("INSERT OR IGNORE INTO leaderboard_settings (guild_id) VALUES (?)", (guild_id,))
+            await db.execute(
+                "UPDATE leaderboard_settings SET channel_id = ?, period = ?, weekday = ?, time_ist = ?, last_posted = NULL WHERE guild_id = ?",
+                (channel_id, period, weekday, time_ist, guild_id),
+            )
+            await db.commit()
 
-        def check(message):
-            return message.author.id == ctx.author.id and message.channel.id == ctx.channel.id
+    @staticmethod
+    def _schedule_confirmation(channel, period, weekday, time_ist):
+        if period == "weekly" and weekday is not None:
+            when = f"every {DAY_NAMES[weekday]}"
+        else:
+            when = "every day"
+        return f"Posts {when} at **{time_ist} IST** in {channel.mention} — chat and VC leaderboards together."
 
-        try:
-            answer = await self.bot.wait_for("message", check=check, timeout=timeout)
-        except asyncio.TimeoutError:
-            await ctx.send("⌛ Timed out — nothing was changed.")
-            return None
-        return answer.content.strip()
+    async def _schedule_summary(self, guild_id):
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT channel_id, period, weekday, time_ist FROM leaderboard_settings WHERE guild_id = ?",
+                (guild_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        if not row or not row[0] or not row[1] or not row[3]:
+            return "No schedule set."
+        channel_id, period, weekday, time_ist = row
+        if period == "weekly" and weekday is not None and 0 <= weekday < len(DAY_NAMES):
+            when = f"every {DAY_NAMES[weekday]}"
+        else:
+            when = "every day"
+        return f"<#{channel_id}> — {when} at **{time_ist} IST**."
+
+    async def start_live_leaderboard(self, guild, channel):
+        embeds = await self._both_leaderboard_embeds(guild)
+        message = await channel.send(embeds=embeds)
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("INSERT OR IGNORE INTO leaderboard_settings (guild_id) VALUES (?)", (guild.id,))
+            await db.execute(
+                "UPDATE leaderboard_settings SET live_channel_id = ?, live_message_id = ? WHERE guild_id = ?",
+                (channel.id, message.id, guild.id),
+            )
+            await db.commit()
+        return message
+
+    async def _live_summary(self, guild_id):
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT live_channel_id FROM leaderboard_settings WHERE guild_id = ?", (guild_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        if not row or not row[0]:
+            return "Not running."
+        return f"Updating every 30 minutes in <#{row[0]}>."
 
     @leaderboard.command(name="schedule", description="Schedule daily or weekly leaderboard posts (IST)")
     @commands.has_permissions(manage_guild=True)
@@ -3740,54 +3891,47 @@ class Leveling (commands .Cog ):
             await ctx.send("🛑 Scheduled leaderboard posts are now off.")
             return
 
-        if channel is None:
-            answer = await self._ask(ctx, "📢 **Which channel?** Mention it or send its ID.")
-            if answer is None:
+        # Fully specified on the command line: save it without asking anything.
+        if channel is not None and period is not None and time is not None:
+            period = period.lower().strip()
+            if period not in ("daily", "weekly"):
+                await ctx.send("Period must be `daily` or `weekly`.")
                 return
-            channel = self._find_text_channel(ctx.guild, answer)
-        if channel is None:
-            await ctx.send("I couldn't find that channel.")
-            return
-
-        if period is None:
-            period = await self._ask(ctx, "🗓️ **Daily or weekly?** Reply `daily` or `weekly`.")
-            if period is None:
-                return
-        period = period.lower().strip()
-        if period not in ("daily", "weekly"):
-            await ctx.send("Period must be `daily` or `weekly`.")
-            return
-
-        weekday = None
-        if period == "weekly":
-            if day is None:
-                day = await self._ask(ctx, "📅 **Which day?** Example: `monday`.")
-                if day is None:
+            weekday = None
+            if period == "weekly":
+                weekday = self._parse_weekday(day) if day else None
+                if weekday is None:
+                    await ctx.send("That day isn't valid — use monday to sunday.")
                     return
-            weekday = self._parse_weekday(day)
-            if weekday is None:
-                await ctx.send("That day isn't valid — use monday to sunday.")
+            time_ist = self._parse_hhmm(time)
+            if time_ist is None:
+                await ctx.send("That time isn't valid — use 24-hour `HH:MM`, e.g. `20:30`.")
                 return
-
-        if time is None:
-            time = await self._ask(ctx, "🕒 **What time (IST)?** Use 24-hour `HH:MM`, e.g. `20:30`.")
-            if time is None:
-                return
-        time_ist = self._parse_hhmm(time)
-        if time_ist is None:
-            await ctx.send("That time isn't valid — use 24-hour `HH:MM`, e.g. `20:30`.")
+            await self.save_leaderboard_schedule(ctx.guild.id, channel.id, period, weekday, time_ist)
+            await ctx.send(f"✅ {self._schedule_confirmation(channel, period, weekday, time_ist)}")
             return
 
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("INSERT OR IGNORE INTO leaderboard_settings (guild_id) VALUES (?)", (ctx.guild.id,))
-            await db.execute(
-                "UPDATE leaderboard_settings SET channel_id = ?, period = ?, weekday = ?, time_ist = ?, last_posted = NULL WHERE guild_id = ?",
-                (channel.id, period, weekday, time_ist, ctx.guild.id),
-            )
-            await db.commit()
+        # Anything missing is collected in a popup instead of chat questions.
+        build_modal = lambda: LeaderboardScheduleModal(
+            self, ctx.guild,
+            channel.mention if channel else None,
+            period, day, time,
+        )
 
-        when = f"every {day.title()}" if period == "weekly" else "every day"
-        await ctx.send(f"✅ Leaderboard will post {when} at **{time_ist} IST** in {channel.mention}.")
+        interaction = getattr(ctx, 'interaction', None)
+        if interaction is not None:
+            await interaction.response.send_modal(build_modal())
+            return
+
+        embed = discord.Embed(
+            title="🗓️ Leaderboard Schedule",
+            description="Press the button below to open the schedule popup.\n"
+                        "Times are IST, and each post includes both the chat and VC leaderboards.",
+            color=0xFF0000,
+            timestamp=datetime.now(IST),
+        )
+        embed.add_field(name="Current", value=await self._schedule_summary(ctx.guild.id), inline=False)
+        await ctx.send(embed=embed, view=SettingsLauncherView(build_modal, label="Set Schedule", emoji="🗓️"))
 
     @leaderboard.command(name="live", description="Post a leaderboard that refreshes every 30 minutes")
     @commands.has_permissions(manage_guild=True)
@@ -3803,17 +3947,29 @@ class Leveling (commands .Cog ):
             await ctx.send("🛑 Live leaderboard updates are now off.")
             return
 
-        channel = channel or ctx.channel
-        embeds = await self._both_leaderboard_embeds(ctx.guild)
-        message = await channel.send(embeds=embeds)
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("INSERT OR IGNORE INTO leaderboard_settings (guild_id) VALUES (?)", (ctx.guild.id,))
-            await db.execute(
-                "UPDATE leaderboard_settings SET live_channel_id = ?, live_message_id = ? WHERE guild_id = ?",
-                (channel.id, message.id, ctx.guild.id),
-            )
-            await db.commit()
-        await ctx.send(f"✅ Live leaderboard started in {channel.mention} — it refreshes every 30 minutes.")
+        # A channel was given on the command line: start it right away.
+        if channel is not None:
+            await self.start_live_leaderboard(ctx.guild, channel)
+            await ctx.send(f"✅ Live leaderboard started in {channel.mention} — it refreshes every 30 minutes (chat + VC).")
+            return
+
+        # Otherwise pick the channel in a popup instead of chat questions.
+        build_modal = lambda: LeaderboardLiveModal(self, ctx.guild, ctx.channel)
+
+        interaction = getattr(ctx, 'interaction', None)
+        if interaction is not None:
+            await interaction.response.send_modal(build_modal())
+            return
+
+        embed = discord.Embed(
+            title="📡 Live Leaderboard",
+            description="Press the button below to choose the channel in a popup.\n"
+                        "The panel refreshes every 30 minutes and shows the chat and VC leaderboards.",
+            color=0xFF0000,
+            timestamp=datetime.now(IST),
+        )
+        embed.add_field(name="Current", value=await self._live_summary(ctx.guild.id), inline=False)
+        await ctx.send(embed=embed, view=SettingsLauncherView(build_modal, label="Start Live Panel", emoji="📡"))
 
     @tasks.loop(minutes=1)
     async def schedule_loop(self):
