@@ -1,7 +1,8 @@
 import discord 
 from utils.emoji import CROSS, TICK, ZWARNING
 from utils.Tools import getConfig
-from utils.greet_render import GreetingError, send_greeting
+from utils.cv2_store import build_view, get_template
+from utils.embed_store import get_embed, render_embed
 from utils.variables import build_variables, find_template_tokens, render
 from utils.varhelp import VariablesView
 from discord import app_commands 
@@ -3251,10 +3252,11 @@ class Leveling (commands .Cog ):
             logger.error(f"Error saving VC settings: {e}")
 
     async def _send_level_message(self, channel, guild, member, new_level, message, earned_roles=None):
-        """Send a level-up message as normal text.
+        """Send a level-up message as plain text.
 
-        ``{embed:name}`` and ``{cv2:name}`` are still supported, but the text
-        itself is always the message content and mentions never ping anyone.
+        The message is always the message content. ``{embed:name}`` attaches a
+        saved embed and ``{cv2:name}`` turns the message into that Components V2
+        layout with the text shown above the container. Mentions never ping.
         """
         prefix = None
         try:
@@ -3279,31 +3281,48 @@ class Leveling (commands .Cog ):
         no_pings = discord.AllowedMentions.none()
         template = message or "Congratulations {user}! You have reached level {level}!"
 
-        try:
-            sent = await send_greeting(
-                channel,
-                guild=guild,
-                member=member,
-                channel=channel,
-                welcome_type="simple",
-                welcome_message=template,
-                bot=self.bot,
-                prefix=prefix,
-                extra=extra,
-                allowed_mentions=no_pings,
-            )
-            if sent:
-                return
-        except GreetingError as exc:
-            logger.error(f"Level up template error: {exc}")
-
-        text, _embed_name, _cv2_name = find_template_tokens(template)
         variables = build_variables(
             user=member, guild=guild, channel=channel, bot=self.bot, prefix=prefix, extra=extra
         )
-        rendered = render(text, variables, guild=guild)
-        if rendered:
-            await channel.send(rendered, allowed_mentions=no_pings)
+        text, embed_name, cv2_name = find_template_tokens(template)
+        content = render(text, variables, guild=guild)
+
+        if cv2_name:
+            row = await get_template(guild.id, cv2_name)
+            if row is None:
+                logger.error(f"Level-up layout `{cv2_name}` no longer exists")
+            else:
+                try:
+                    view = build_view(
+                        row['data'],
+                        template_id=row['id'],
+                        placeholders=variables,
+                        prefix_text=content or None,
+                    )
+                    await channel.send(view=view, allowed_mentions=no_pings)
+                    return
+                except Exception as e:
+                    logger.error(f"Level-up layout `{cv2_name}` failed: {e}")
+
+        embeds = []
+        if embed_name:
+            saved = await get_embed(guild.id, embed_name)
+            if saved is None:
+                logger.error(f"Level-up embed `{embed_name}` no longer exists")
+            else:
+                try:
+                    embeds.append(render_embed(saved['data'], variables))
+                except Exception as e:
+                    logger.error(f"Level-up embed `{embed_name}` failed: {e}")
+
+        if not content and not embeds:
+            return
+
+        await channel.send(
+            content=content or None,
+            embeds=embeds or None,
+            allowed_mentions=no_pings,
+        )
 
     async def announce_vc_level_up(self, guild, member, new_level, settings, fallback_channel=None,
                                    *, destination=None, earned_roles=None):
