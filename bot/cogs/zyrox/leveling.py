@@ -28,4 +28,4 @@ __**Rewards & Roles**__
 __**Multipliers & Blacklist**__
 `level multiplier` , `level multiplier add` , `level multiplier list` , `level multiplier remove` , `level blacklist` , `level blacklist add` , `level blacklist list` , `level blacklist remove`
 __**Utilities**__
-`level placeholders` , `level stats` , `level test` , `setxp` , `resetxp` , `setlevel`"""
+`level overview` , `rewards` , `level placeholders` , `level stats` , `level test` , `setxp` , `resetxp` , `setlevel`"""

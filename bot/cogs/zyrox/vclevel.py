@@ -21,8 +21,10 @@ class _vclevel(commands.Cog):
 __**VC Leaderboard**__
 `vcleaderboard` , `leaderboard vc`
 __**VC Setup**__
-`vclevel settings` , `vclevel channel` , `vclevel setxp` , `vclevel setmessage` , `vclevel enable` , `vclevel disable` , `vclevel test`
+`vclevel settings` , `vclevel channel` , `vclevel setxp` , `vclevel setmessage` , `vclevel enable` , `vclevel disable` , `vclevel test` , `vclevel overview`
 __**VC Rewards**__
 `vclevel rewards` , `vclevel rewards add` , `vclevel rewards list` , `vclevel rewards remove`
 __**VC Multipliers**__
-`vclevel multiplier` , `vclevel multiplier add` , `vclevel multiplier list` , `vclevel multiplier remove`"""
+`vclevel multiplier` , `vclevel multiplier add` , `vclevel multiplier list` , `vclevel multiplier remove`
+__**All Rewards**__
+`rewards`"""

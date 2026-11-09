@@ -437,6 +437,39 @@ class LeaderboardLiveModal (discord .ui .Modal ,title ="Live Leaderboard"):
         ephemeral =True )
 
 
+def _clamp(value, limit=1024):
+    value = value or ""
+    return value if len(value) <= limit else value[:limit - 3] + "..."
+
+
+def _reward_lines(guild, rows):
+    lines = []
+    for level, role_id, remove_previous in rows:
+        role = guild.get_role(role_id)
+        name = role.mention if role else f"role {role_id}"
+        suffix = " (replaces previous)" if remove_previous else ""
+        lines.append(f"\u2022 **Level {level}** \u2192 {name}{suffix}")
+    return _clamp("\n".join(lines))
+
+
+def _level_role_lines(guild, rows):
+    lines = []
+    for level, role_id in rows:
+        role = guild.get_role(role_id)
+        name = role.mention if role else f"role {role_id}"
+        lines.append(f"\u2022 **Level {level}** \u2192 {name}")
+    return _clamp("\n".join(lines))
+
+
+def _multiplier_lines(guild, rows):
+    lines = []
+    for target_id, target_type, multiplier in rows:
+        obj = guild.get_role(target_id) if target_type == "role" else guild.get_channel(target_id)
+        name = obj.mention if obj else f"{target_type} {target_id}"
+        lines.append(f"\u2022 {target_type.capitalize()}: {name} \u2192 **{multiplier}x**")
+    return _clamp("\n".join(lines))
+
+
 class Leveling (commands .Cog ):
     def __init__ (self ,bot ):
         self .bot =bot 
@@ -3569,6 +3602,11 @@ class Leveling (commands .Cog ):
         )
         await ctx.send("-# Preview only — no roles were granted and no XP changed.")
 
+    @vclevel.command(name="overview", description="Show VC leveling settings, rewards and multipliers in one panel")
+    @commands.has_permissions(manage_guild=True)
+    async def vc_overview(self, ctx):
+        await ctx.send(embed=await self.build_vc_overview(ctx.guild))
+
     @vclevel.command(name="leaderboard", aliases=["lb"], description="Show the voice leaderboard")
     async def vc_leaderboard(self, ctx):
         rows, label = await self._top_rows(ctx.guild.id, "vc")
@@ -3775,6 +3813,31 @@ class Leveling (commands .Cog ):
             self._leaderboard_embed(guild, chat_rows, "chat", chat_label, limit),
             self._leaderboard_embed(guild, vc_rows, "vc", vc_label, limit),
         ]
+
+    @commands.hybrid_command(name="rewards", aliases=["rewardslist"], description="List every chat and VC level reward")
+    async def rewards_all(self, ctx):
+        guild = ctx.guild
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT level, role_id, remove_previous FROM level_rewards WHERE guild_id = ? ORDER BY level",
+                (guild.id,),
+            ) as cursor:
+                chat_rewards = await cursor.fetchall()
+            async with db.execute(
+                "SELECT level, role_id, remove_previous FROM vc_level_rewards WHERE guild_id = ? ORDER BY level",
+                (guild.id,),
+            ) as cursor:
+                vc_rewards = await cursor.fetchall()
+
+        embed = discord.Embed(
+            title="\U0001F381 All Level Rewards",
+            color=0xFF0000,
+            timestamp=datetime.now(IST),
+        )
+        embed.add_field(name="\U0001F4AC Chat Rewards", value=_reward_lines(guild, chat_rewards) or "None configured.", inline=False)
+        embed.add_field(name="\U0001F50A VC Rewards", value=_reward_lines(guild, vc_rewards) or "None configured.", inline=False)
+        embed.set_footer(text=f"{guild.name} \u2022 {len(chat_rewards)} chat \u2022 {len(vc_rewards)} VC")
+        await ctx.send(embed=embed)
 
     @commands.hybrid_group(name="leaderboard", aliases=["lb"], invoke_without_command=True, description="Chat and voice leaderboards")
     async def leaderboard(self, ctx):
@@ -4049,6 +4112,69 @@ class Leveling (commands .Cog ):
                     await message.edit(embeds=embeds)
             except Exception as e:
                 logger.error(f"Live leaderboard error for guild {guild.id}: {e}")
+
+    async def build_chat_overview(self, guild):
+        """Settings, rewards, level roles and multipliers for chat leveling."""
+        settings = await self.get_guild_settings(guild.id)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT level, role_id, remove_previous FROM level_rewards WHERE guild_id = ? ORDER BY level",
+                (guild.id,),
+            ) as cursor:
+                rewards = await cursor.fetchall()
+            async with db.execute(
+                "SELECT level, role_id FROM level_roles WHERE guild_id = ? ORDER BY level",
+                (guild.id,),
+            ) as cursor:
+                level_roles = await cursor.fetchall()
+            async with db.execute(
+                "SELECT target_id, target_type, multiplier FROM xp_multipliers WHERE guild_id = ?",
+                (guild.id,),
+            ) as cursor:
+                multipliers = await cursor.fetchall()
+
+        embed = discord.Embed(
+            title="\U0001F4AC Chat Leveling Overview",
+            description=_leveling_summary(settings),
+            color=0xFF0000,
+            timestamp=datetime.now(IST),
+        )
+        embed.add_field(name="Rewards", value=_reward_lines(guild, rewards) or "None configured.", inline=False)
+        embed.add_field(name="Level Roles", value=_level_role_lines(guild, level_roles) or "None configured.", inline=False)
+        embed.add_field(name="XP Multipliers", value=_multiplier_lines(guild, multipliers) or "None configured.", inline=False)
+        embed.set_footer(text=f"{guild.name} \u2022 chat levels")
+        return embed
+
+    async def build_vc_overview(self, guild):
+        """Settings, rewards and multipliers for voice leveling."""
+        settings = await self.get_vc_settings(guild.id)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT level, role_id, remove_previous FROM vc_level_rewards WHERE guild_id = ? ORDER BY level",
+                (guild.id,),
+            ) as cursor:
+                rewards = await cursor.fetchall()
+            async with db.execute(
+                "SELECT target_id, target_type, multiplier FROM vc_xp_multipliers WHERE guild_id = ?",
+                (guild.id,),
+            ) as cursor:
+                multipliers = await cursor.fetchall()
+
+        embed = discord.Embed(
+            title="\U0001F50A VC Leveling Overview",
+            description=_vc_summary(settings),
+            color=0xFF0000,
+            timestamp=datetime.now(IST),
+        )
+        embed.add_field(name="Rewards", value=_reward_lines(guild, rewards) or "None configured.", inline=False)
+        embed.add_field(name="XP Multipliers", value=_multiplier_lines(guild, multipliers) or "None configured.", inline=False)
+        embed.set_footer(text=f"{guild.name} \u2022 voice levels")
+        return embed
+
+    @level .command (name ="overview", description ="Show chat leveling settings, rewards and multipliers in one panel")
+    @commands .has_permissions (manage_guild =True )
+    async def level_overview (self ,ctx ):
+        await ctx .send (embed =await self .build_chat_overview (ctx .guild ))
 
     @level.command(name="test", description="Preview the level-up message without granting anything")
     @commands.has_permissions(manage_guild=True)
