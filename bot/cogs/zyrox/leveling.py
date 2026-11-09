@@ -18,14 +18,14 @@ class _leveling(commands.Cog):
     @commands.group()
     async def __Leveling__(self, ctx: commands.Context):
         """__**Chat Rank**__
-`chatlevel` , `rankchat`
+`chatrank` , `rankchat`
 __**Leaderboards**__
 `leaderboard` , `leaderboard chat` , `leaderboard schedule` , `leaderboard live` , `leaderboard liveinterval`
 __**XP Settings**__
-`level` , `level settings` , `level setxp` , `level setmessage` , `level setcolor` , `level thumbnail` , `level cooldown` , `level channel` , `level enable` , `level disable`
+`chatlevel` , `chatlevel settings` , `chatlevel setxp` , `chatlevel setmessage` , `chatlevel setcolor` , `chatlevel thumbnail` , `chatlevel cooldown` , `chatlevel channel` , `chatlevel enable` , `chatlevel disable`
 __**Rewards & Roles**__
-`level rewards` , `level rewards add` , `level rewards list` , `level rewards remove` , `setlevelrole` , `removelevelrole` , `listlevelroles`
+`chatlevel rewards` , `chatlevel rewards add` , `chatlevel rewards list` , `chatlevel rewards remove` , `setlevelrole` , `removelevelrole` , `listlevelroles`
 __**Multipliers & Blacklist**__
-`level multiplier` , `level multiplier add` , `level multiplier list` , `level multiplier remove` , `level blacklist` , `level blacklist add` , `level blacklist list` , `level blacklist remove`
+`chatlevel multiplier` , `chatlevel multiplier add` , `chatlevel multiplier list` , `chatlevel multiplier remove` , `chatlevel blacklist` , `chatlevel blacklist add` , `chatlevel blacklist list` , `chatlevel blacklist remove`
 __**Utilities**__
-`level overview` , `rewards` , `level placeholders` , `level stats` , `level test` , `setxp` , `resetxp` , `setlevel`"""
+`chatlevel overview` , `rewards` , `chatlevel placeholders` , `chatlevel stats` , `chatlevel test` , `setxp` , `resetxp` , `setlevel`"""

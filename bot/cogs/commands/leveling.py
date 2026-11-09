@@ -496,7 +496,7 @@ class Leveling (commands .Cog ):
         self .last_level_cache ={}
         self .db_path ="db/leveling.db"
 
-    @commands.group (name ="level",invoke_without_command =True ,description ="Leveling system")
+    @commands.group (name ="chatlevel",invoke_without_command =True ,description ="Chat leveling system")
     async def level (self ,ctx ):
         """Main leveling command"""
         if ctx .invoked_subcommand is None :
@@ -926,7 +926,7 @@ class Leveling (commands .Cog ):
                                 earned_roles=None):
         """Render and send a level-up message.
 
-        ``earned_roles`` is only passed by ``level test`` (so nothing is
+        ``earned_roles`` is only passed by ``chatlevel test`` (so nothing is
         granted); when it is ``None`` the reward and level roles are applied
         first so ``{earned}`` can name them.
         """
@@ -944,7 +944,7 @@ class Leveling (commands .Cog ):
                     channel = fallback_channel
 
             if channel is None:
-                logger.error("No usable channel for the level-up message (set one with `level channel`)")
+                logger.error("No usable channel for the level-up message (set one with `chatlevel channel`)")
                 return
 
             if earned_roles is None:
@@ -2986,9 +2986,9 @@ class Leveling (commands .Cog ):
             title =f"{TICK} Leveling System Enabled",
             description ="The leveling system has been successfully enabled for this server!\n\n"
             "**Next Steps:**\n"
-            "• Use `/level settings` to configure XP rates and messages\n"
-            "• Use `/level channel` to set level-up announcement channel\n"
-            "• Use `/level rewards add` to set up level rewards",
+            "• Use `/chatlevel settings` to configure XP rates and messages\n"
+            "• Use `/chatlevel channel` to set level-up announcement channel\n"
+            "• Use `/chatlevel rewards add` to set up level rewards",
             color =0x00FF00 ,
             timestamp =datetime .now (IST )
             )
@@ -3552,7 +3552,7 @@ class Leveling (commands .Cog ):
         embed.set_thumbnail(url=member.display_avatar.url)
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="chatlevel", aliases=["cl"], description="Show chat level and rank")
+    @commands.hybrid_command(name="chatrank", aliases=["cl"], description="Show chat level and rank")
     async def chatlevel(self, ctx, member: Optional[discord.Member] = None):
         await self._send_rank(ctx, member or ctx.author, "chat")
 
