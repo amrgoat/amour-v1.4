@@ -3638,7 +3638,7 @@ class Leveling (commands .Cog ):
     @vclevel.command(name="leaderboard", aliases=["lb"], description="Show the voice leaderboard")
     async def vc_leaderboard(self, ctx):
         rows, label = await self._top_rows(ctx.guild.id, "vc")
-        await ctx.send(embed=self._leaderboard_embed(ctx.guild, rows, "vc", label))
+        await ctx.send(view=self._leaderboard_view(ctx.guild, rows, "vc", label))
 
     @vclevel.group(name="rewards", invoke_without_command=True, description="Manage VC level rewards")
     async def vc_rewards(self, ctx):
@@ -3793,7 +3793,7 @@ class Leveling (commands .Cog ):
     @commands.hybrid_command(name="vcleaderboard", aliases=["vclb"], description="Show the voice leaderboard")
     async def vcleaderboard_cmd(self, ctx):
         rows, label = await self._top_rows(ctx.guild.id, "vc")
-        await ctx.send(embed=self._leaderboard_embed(ctx.guild, rows, "vc", label))
+        await ctx.send(view=self._leaderboard_view(ctx.guild, rows, "vc", label))
 
     @commands.hybrid_command(name="rankvc", aliases=["rv"], description="Show a basic voice rank")
     async def rankvc(self, ctx, member: Optional[discord.Member] = None):
@@ -3815,7 +3815,8 @@ class Leveling (commands .Cog ):
                 rows = await cursor.fetchall()
         return rows, label
 
-    def _leaderboard_embed(self, guild, rows, kind, label, limit=10):
+    def _leaderboard_container(self, guild, rows, kind, label, limit=10):
+        """One CV2 container: server icon + name, a divider, then the top entries."""
         title = "VC Leaderboard" if kind == "vc" else "Chat Leaderboard"
         lines = []
         for position, (user_id, xp, count) in enumerate(rows, start=1):
@@ -3825,47 +3826,35 @@ class Leveling (commands .Cog ):
                 f"`{position:02d}` **{name}** — Level {calculate_level_from_xp(xp)} · "
                 f"{xp:,} XP · {count:,} {label}"
             )
-        embed = discord.Embed(
-            title=f"🏆 {title} — {guild.name}",
-            description="\n".join(lines) if lines else "No data yet — start chatting or join a voice channel!",
-            color=0xFF0000,
-            timestamp=datetime.now(IST),
-        )
-        embed.set_footer(text=f"Top {limit} • {datetime.now(IST).strftime('%d %b %Y, %I:%M %p IST')}")
-        return embed
 
-    async def _both_leaderboard_embeds(self, guild, limit=10):
+        body = "\n".join(lines) if lines else "No data yet — start chatting or join a voice channel!"
+        note = f"Top {limit} • {datetime.now(IST).strftime('%d %b %Y, %I:%M %p IST')}"
+
+        container = discord.ui.Container(accent_color=0xFF0000)
+        header = discord.ui.TextDisplay(f"**{guild.name}**\n🏆 {title}")
+        icon = guild.icon.url if guild.icon else None
+        if icon:
+            container.add_item(discord.ui.Section(header, accessory=discord.ui.Thumbnail(icon)))
+        else:
+            container.add_item(header)
+        container.add_item(discord.ui.Separator(visible=True))
+        container.add_item(discord.ui.TextDisplay(body))
+        container.add_item(discord.ui.Separator(visible=True))
+        container.add_item(discord.ui.TextDisplay(f"*{note}*"))
+        return container
+
+    def _leaderboard_view(self, guild, rows, kind, label, limit=10):
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(self._leaderboard_container(guild, rows, kind, label, limit))
+        return view
+
+    async def _both_leaderboard_view(self, guild, limit=10):
         chat_rows, chat_label = await self._top_rows(guild.id, "chat", limit)
         vc_rows, vc_label = await self._top_rows(guild.id, "vc", limit)
-        return [
-            self._leaderboard_embed(guild, chat_rows, "chat", chat_label, limit),
-            self._leaderboard_embed(guild, vc_rows, "vc", vc_label, limit),
-        ]
-
-    @commands.hybrid_command(name="rewards", aliases=["rewardslist"], description="List every chat and VC level reward")
-    async def rewards_all(self, ctx):
-        guild = ctx.guild
-        async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute(
-                "SELECT level, role_id, remove_previous FROM level_rewards WHERE guild_id = ? ORDER BY level",
-                (guild.id,),
-            ) as cursor:
-                chat_rewards = await cursor.fetchall()
-            async with db.execute(
-                "SELECT level, role_id, remove_previous FROM vc_level_rewards WHERE guild_id = ? ORDER BY level",
-                (guild.id,),
-            ) as cursor:
-                vc_rewards = await cursor.fetchall()
-
-        embed = discord.Embed(
-            title="\U0001F381 All Level Rewards",
-            color=0xFF0000,
-            timestamp=datetime.now(IST),
-        )
-        embed.add_field(name="\U0001F4AC Chat Rewards", value=_reward_lines(guild, chat_rewards) or "None configured.", inline=False)
-        embed.add_field(name="\U0001F50A VC Rewards", value=_reward_lines(guild, vc_rewards) or "None configured.", inline=False)
-        embed.set_footer(text=f"{guild.name} \u2022 {len(chat_rewards)} chat \u2022 {len(vc_rewards)} VC")
-        await ctx.send(embed=embed)
+        view = discord.ui.LayoutView(timeout=None)
+        view.add_item(self._leaderboard_container(guild, chat_rows, "chat", chat_label, limit))
+        view.add_item(self._leaderboard_container(guild, vc_rows, "vc", vc_label, limit))
+        return view
 
     @commands.hybrid_group(name="leaderboard", aliases=["lb"], invoke_without_command=True, description="Chat and voice leaderboards")
     async def leaderboard(self, ctx):
@@ -3875,12 +3864,12 @@ class Leveling (commands .Cog ):
     @leaderboard.command(name="chat", description="Show the chat leaderboard")
     async def leaderboard_chat(self, ctx):
         rows, label = await self._top_rows(ctx.guild.id, "chat")
-        await ctx.send(embed=self._leaderboard_embed(ctx.guild, rows, "chat", label))
+        await ctx.send(view=self._leaderboard_view(ctx.guild, rows, "chat", label))
 
     @leaderboard.command(name="vc", description="Show the voice leaderboard")
     async def leaderboard_vc(self, ctx):
         rows, label = await self._top_rows(ctx.guild.id, "vc")
-        await ctx.send(embed=self._leaderboard_embed(ctx.guild, rows, "vc", label))
+        await ctx.send(view=self._leaderboard_view(ctx.guild, rows, "vc", label))
 
     @staticmethod
     def _parse_hhmm(raw):
@@ -3962,8 +3951,8 @@ class Leveling (commands .Cog ):
         return self._clamp_interval(row[0] if row and row[0] is not None else 30)
 
     async def start_live_leaderboard(self, guild, channel, interval=None):
-        embeds = await self._both_leaderboard_embeds(guild)
-        message = await channel.send(embeds=embeds)
+        view = await self._both_leaderboard_view(guild)
+        message = await channel.send(view=view)
         stamp = datetime.now(IST).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("INSERT OR IGNORE INTO leaderboard_settings (guild_id) VALUES (?)", (guild.id,))
@@ -4147,7 +4136,7 @@ class Leveling (commands .Cog ):
                 channel = self.bot.get_channel(channel_id)
                 if channel is None:
                     continue
-                await channel.send(embeds=await self._both_leaderboard_embeds(guild))
+                await channel.send(view=await self._both_leaderboard_view(guild))
                 async with aiosqlite.connect(self.db_path) as db:
                     await db.execute(
                         "UPDATE leaderboard_settings SET last_posted = ? WHERE guild_id = ?",
@@ -4192,7 +4181,7 @@ class Leveling (commands .Cog ):
                 if channel is None:
                     continue
 
-                embeds = await self._both_leaderboard_embeds(guild)
+                view = await self._both_leaderboard_view(guild)
                 message = None
                 if message_id:
                     try:
@@ -4200,9 +4189,9 @@ class Leveling (commands .Cog ):
                     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                         message = None
                 if message is None:
-                    message = await channel.send(embeds=embeds)
+                    message = await channel.send(view=view)
                 else:
-                    await message.edit(embeds=embeds)
+                    await message.edit(view=view)
 
                 async with aiosqlite.connect(self.db_path) as db:
                     await db.execute(
