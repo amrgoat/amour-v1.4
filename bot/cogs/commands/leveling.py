@@ -409,7 +409,7 @@ class LeaderboardScheduleModal (discord .ui .Modal ,title ="Leaderboard Schedule
 
 
 class LeaderboardLiveModal (discord .ui .Modal ,title ="Live Leaderboard"):
-    def __init__ (self ,cog ,guild ,fallback_channel ,interval =30 ):
+    def __init__ (self ,cog ,guild ,fallback_channel ,interval =30 ,kind ="both"):
         super ().__init__ ()
         self .cog =cog 
         self .guild =guild 
@@ -427,8 +427,16 @@ class LeaderboardLiveModal (discord .ui .Modal ,title ="Live Leaderboard"):
         required =True ,
         max_length =4 
         )
+        self .kind =discord .ui .TextInput (
+        label ="Show (chat, vc or both)",
+        placeholder ="both",
+        default =kind or "both",
+        required =False ,
+        max_length =5 
+        )
         self .add_item (self .channel )
         self .add_item (self .interval )
+        self .add_item (self .kind )
 
     async def on_submit (self ,interaction :discord .Interaction ):
         await interaction .response .defer (ephemeral =True )
@@ -448,11 +456,17 @@ class LeaderboardLiveModal (discord .ui .Modal ,title ="Live Leaderboard"):
             f"{CROSS} The interval must be a whole number of minutes between 1 and 1440.",ephemeral =True )
             return 
 
+        kind =self .cog ._normalise_kind (self .kind .value )
+        if kind is None :
+            await interaction .followup .send (
+            f"{CROSS} Show must be `chat`, `vc` or `both`.",ephemeral =True )
+            return 
+
         interval =self .cog ._clamp_interval (minutes )
-        await self .cog .start_live_leaderboard (self .guild ,channel ,interval )
+        await self .cog .start_live_leaderboard (self .guild ,channel ,interval ,kind )
         plural ="" if interval ==1 else "s"
         await interaction .followup .send (
-        f"✅ Live leaderboard started in {channel.mention} — it refreshes every {interval} minute{plural} (chat + VC).",
+        f"✅ Live leaderboard started in {channel.mention} — it refreshes every {interval} minute{plural} ({self.cog._kind_label(kind)}).",
         ephemeral =True )
 
 
@@ -486,6 +500,28 @@ def _multiplier_lines(guild, rows):
         obj = guild.get_role(target_id) if target_type == "role" else guild.get_channel(target_id)
         name = obj.mention if obj else f"{target_type} {target_id}"
         lines.append(f"\u2022 {target_type.capitalize()}: {name} \u2192 **{multiplier}x**")
+    return _clamp("\n".join(lines))
+
+
+def _blacklist_lines(guild, rows):
+    lines = []
+    for target_id, target_type in rows:
+        if target_type == "role":
+            obj = guild.get_role(target_id)
+        elif target_type == "channel":
+            obj = guild.get_channel(target_id)
+        else:
+            obj = guild.get_member(target_id)
+        name = obj.mention if obj else f"{target_type or 'user'} {target_id}"
+        lines.append(f"\u2022 {name}")
+    return _clamp("\n".join(lines))
+
+
+def _vc_blacklist_lines(guild, channel_ids):
+    lines = []
+    for channel_id in channel_ids:
+        channel = guild.get_channel(channel_id)
+        lines.append(f"\u2022 {channel.mention if channel else f'channel {channel_id}'}")
     return _clamp("\n".join(lines))
 
 
@@ -654,6 +690,14 @@ class Leveling (commands .Cog ):
                 """)
 
                 await db .execute ("""
+                    CREATE TABLE IF NOT EXISTS vc_blacklist (
+                        guild_id INTEGER,
+                        channel_id INTEGER,
+                        PRIMARY KEY (guild_id, channel_id)
+                    )
+                """)
+
+                await db .execute ("""
                     CREATE TABLE IF NOT EXISTS leaderboard_settings (
                         guild_id INTEGER PRIMARY KEY,
                         channel_id INTEGER,
@@ -664,12 +708,14 @@ class Leveling (commands .Cog ):
                         live_channel_id INTEGER,
                         live_message_id INTEGER,
                         live_interval INTEGER DEFAULT 30,
-                        live_last_posted TEXT
+                        live_last_posted TEXT,
+                        live_kind TEXT DEFAULT 'both'
                     )
                 """)
 
                 await db .commit ()
-                for column, ddl in (("live_interval", "INTEGER DEFAULT 30"), ("live_last_posted", "TEXT")):
+                for column, ddl in (("live_interval", "INTEGER DEFAULT 30"), ("live_last_posted", "TEXT"),
+                                    ("live_kind", "TEXT DEFAULT 'both'")):
                     async with db.cursor() as cursor:
                         await cursor.execute("PRAGMA table_info(leaderboard_settings)")
                         existing_columns = [col[1] for col in await cursor.fetchall()]
@@ -2942,6 +2988,53 @@ class Leveling (commands .Cog ):
             logger .error (f"Error creating text leaderboard: {e}")
             return "Failed to generate leaderboard."
 
+    async def build_chat_overview (self ,guild ):
+        """Chat settings, rewards, multipliers and the blacklist in one embed."""
+        settings =await self .get_guild_settings (guild .id )
+        async with aiosqlite .connect (self .db_path )as db :
+            async with db .execute (
+                "SELECT level, role_id, remove_previous FROM level_rewards WHERE guild_id = ? ORDER BY level",
+                (guild .id ,),
+            )as cursor :
+                rewards =await cursor .fetchall ()
+            async with db .execute (
+                "SELECT target_id, target_type, multiplier FROM xp_multipliers WHERE guild_id = ?",
+                (guild .id ,),
+            )as cursor :
+                multipliers =await cursor .fetchall ()
+            async with db .execute (
+                "SELECT target_id, target_type FROM leveling_blacklist WHERE guild_id = ?",
+                (guild .id ,),
+            )as cursor :
+                blacklisted =await cursor .fetchall ()
+
+        low =settings .get ('min_xp',15 )
+        high =settings .get ('max_xp',25 )
+        xp_text =str (low )if low ==high else f"{low}-{high}"
+        channel_id =settings .get ('channel_id')
+        summary =(
+            f"Status: **{'Enabled' if settings.get('enabled') else 'Disabled'}**\n"
+            f"XP per message: `{xp_text}`\n"
+            f"Cooldown: `{settings.get('cooldown_seconds', 60)}s`\n"
+            f"Level-up channel: {f'<#{channel_id}>' if channel_id else 'The channel they chatted in'}"
+        )
+
+        embed =discord .Embed (
+            title="💬 Chat Leveling Overview",
+            color=0xFF0000 ,
+            timestamp=datetime .now (IST ),
+        )
+        embed .add_field (name ="Settings",value =_clamp (summary ),inline =False )
+        embed .add_field (name ="Rewards",value =_reward_lines (guild ,rewards )or "None configured.",inline =False )
+        embed .add_field (name ="Multipliers",value =_multiplier_lines (guild ,multipliers )or "None configured.",inline =False )
+        embed .add_field (name ="Blacklist",value =_blacklist_lines (guild ,blacklisted )or "None.",inline =False )
+        return embed
+
+    @level .command (name ="overview",description ="Show chat leveling settings, rewards and multipliers in one panel")
+    @commands .has_permissions (manage_guild =True )
+    async def level_overview (self ,ctx ):
+        await ctx .send (embed =await self .build_chat_overview (ctx .guild ))
+
     @level .command (name ="placeholders",description ="Show available placeholders for level-up messages")
     async def placeholders (self ,ctx ):
         """Show placeholders for level-up messages"""
@@ -3460,8 +3553,25 @@ class Leveling (commands .Cog ):
             logger.error(f"Error giving VC level rewards: {e}")
         return granted
 
+    async def is_vc_blacklisted(self, guild_id, channel_id):
+        """True when a voice channel is excluded from earning voice XP."""
+        if channel_id is None:
+            return False
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT 1 FROM vc_blacklist WHERE guild_id = ? AND channel_id = ?",
+                    (guild_id, channel_id),
+                ) as cursor:
+                    return await cursor.fetchone() is not None
+        except Exception as e:
+            logger.error(f"Error checking VC blacklist: {e}")
+            return False
+
     async def _award_vc_minute(self, guild, member, settings, fallback_channel=None):
         """Give one minute of voice XP, announcing a level up when it happens."""
+        if await self.is_vc_blacklisted(guild.id, getattr(fallback_channel, 'id', None)):
+            return
         xp_low = int(settings.get('min_xp', 10) or 10)
         xp_high = int(settings.get('max_xp', 20) or xp_low)
         if xp_low > xp_high:
@@ -3506,6 +3616,8 @@ class Leveling (commands .Cog ):
                 afk_id = guild.afk_channel.id if guild.afk_channel else None
                 for channel in guild.voice_channels:
                     if afk_id is not None and channel.id == afk_id:
+                        continue
+                    if await self.is_vc_blacklisted(guild.id, channel.id):
                         continue
                     for member in list(channel.members):
                         if member.bot:
@@ -3552,12 +3664,8 @@ class Leveling (commands .Cog ):
         embed.set_thumbnail(url=member.display_avatar.url)
         await ctx.send(embed=embed)
 
-    @commands.hybrid_command(name="chatrank", aliases=["cl"], description="Show chat level and rank")
-    async def chatlevel(self, ctx, member: Optional[discord.Member] = None):
-        await self._send_rank(ctx, member or ctx.author, "chat")
-
-    @commands.hybrid_command(name="rankchat", aliases=["rc"], description="Show a basic chat rank")
-    async def rankchat(self, ctx, member: Optional[discord.Member] = None):
+    @commands.hybrid_command(name="chatrank", aliases=["cr"], description="Show chat level and rank")
+    async def chatrank(self, ctx, member: Optional[discord.Member] = None):
         await self._send_rank(ctx, member or ctx.author, "chat")
 
     @commands.hybrid_group(name="vclevel", aliases=["vl"], invoke_without_command=True,
@@ -3648,6 +3756,41 @@ class Leveling (commands .Cog ):
             destination=ctx.channel, earned_roles=preview_roles,
         )
         await ctx.send("-# Preview only — no roles were granted and no XP changed.")
+
+    async def build_vc_overview(self, guild):
+        """Settings, rewards, multipliers and the channel blacklist in one embed."""
+        settings = await self.get_vc_settings(guild.id)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT level, role_id, remove_previous FROM vc_level_rewards "
+                "WHERE guild_id = ? ORDER BY level",
+                (guild.id,),
+            ) as cursor:
+                rewards = await cursor.fetchall()
+            async with db.execute(
+                "SELECT target_id, target_type, multiplier FROM vc_xp_multipliers WHERE guild_id = ?",
+                (guild.id,),
+            ) as cursor:
+                multipliers = await cursor.fetchall()
+            async with db.execute(
+                "SELECT channel_id FROM vc_blacklist WHERE guild_id = ?", (guild.id,)
+            ) as cursor:
+                blacklisted = [row[0] for row in await cursor.fetchall()]
+
+        embed = discord.Embed(
+            title="🔊 VC Leveling Overview",
+            color=0xFF0000,
+            timestamp=datetime.now(IST),
+        )
+        embed.add_field(name="Settings", value=_clamp(_vc_summary(settings)), inline=False)
+        embed.add_field(name="Rewards", value=_reward_lines(guild, rewards) or "None configured.", inline=False)
+        embed.add_field(name="Multipliers", value=_multiplier_lines(guild, multipliers) or "None configured.", inline=False)
+        embed.add_field(
+            name="Blacklisted channels",
+            value=_vc_blacklist_lines(guild, blacklisted) or "None.",
+            inline=False,
+        )
+        return embed
 
     @vclevel.command(name="overview", description="Show VC leveling settings, rewards and multipliers in one panel")
     @commands.has_permissions(manage_guild=True)
@@ -3809,13 +3952,62 @@ class Leveling (commands .Cog ):
             )
         await ctx.send(embed=embed)
 
+    @vclevel.group(name="blacklist", invoke_without_command=True,
+                   description="Voice channels that never earn XP")
+    async def vc_blacklist(self, ctx):
+        if ctx.invoked_subcommand is None:
+            await ctx.send_help(ctx.command)
+
+    @vc_blacklist.command(name="add", description="Stop a voice channel from earning voice XP")
+    @commands.has_permissions(administrator=True)
+    async def vc_blacklist_add(self, ctx, channel: discord.VoiceChannel):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "INSERT OR REPLACE INTO vc_blacklist (guild_id, channel_id) VALUES (?, ?)",
+                (ctx.guild.id, channel.id),
+            )
+            await db.commit()
+        await ctx.send(f"Added {channel.mention} to the VC blacklist — no voice XP is earned there.")
+
+    @vc_blacklist.command(name="remove", description="Let a blacklisted voice channel earn XP again")
+    @commands.has_permissions(administrator=True)
+    async def vc_blacklist_remove(self, ctx, channel: discord.VoiceChannel):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "DELETE FROM vc_blacklist WHERE guild_id = ? AND channel_id = ?",
+                (ctx.guild.id, channel.id),
+            )
+            await db.commit()
+        await ctx.send(f"Removed {channel.mention} from the VC blacklist.")
+
+    @vc_blacklist.command(name="list", description="List blacklisted voice channels")
+    @commands.has_permissions(administrator=True)
+    async def vc_blacklist_list(self, ctx):
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT channel_id FROM vc_blacklist WHERE guild_id = ?", (ctx.guild.id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        if not rows:
+            await ctx.send("No VC channels are blacklisted.")
+            return
+
+        embed = discord.Embed(
+            title="VC Blacklist",
+            description=_vc_blacklist_lines(ctx.guild, [row[0] for row in rows]) or "No VC channels are blacklisted.",
+            color=0xFF0000,
+            timestamp=datetime.now(IST),
+        )
+        await ctx.send(embed=embed)
+
     @commands.hybrid_command(name="vcleaderboard", aliases=["vclb"], description="Show the voice leaderboard")
     async def vcleaderboard_cmd(self, ctx):
         rows, label = await self._top_rows(ctx.guild.id, "vc")
         await ctx.send(view=self._leaderboard_view(ctx.guild, rows, "vc", label))
 
-    @commands.hybrid_command(name="rankvc", aliases=["rv"], description="Show a basic voice rank")
-    async def rankvc(self, ctx, member: Optional[discord.Member] = None):
+    @commands.hybrid_command(name="vcrank", aliases=["vr"], description="Show voice level and rank")
+    async def vcrank(self, ctx, member: Optional[discord.Member] = None):
         await self._send_rank(ctx, member or ctx.author, "vc")
 
     # ── Leaderboards ──────────────────────────────────────────────────────
@@ -3847,9 +4039,9 @@ class Leveling (commands .Cog ):
             )
 
         body = "\n".join(lines) if lines else "No data yet — start chatting or join a voice channel!"
-        note = f"Top {limit} • {datetime.now(IST).strftime('%d %b %Y, %I:%M %p IST')}"
+        note = f"Last refreshed: {datetime.now(IST).strftime('%d %b %Y, %I:%M %p')}"
 
-        container = discord.ui.Container(accent_color=0xFF0000)
+        container = discord.ui.Container()
         header = discord.ui.TextDisplay(f"**{guild.name}**\n🏆 {title}")
         icon = guild.icon.url if guild.icon else None
         if icon:
@@ -3875,10 +4067,48 @@ class Leveling (commands .Cog ):
         view.add_item(self._leaderboard_container(guild, vc_rows, "vc", vc_label, limit))
         return view
 
+    async def _live_leaderboard_view(self, guild, kind="both", limit=10):
+        """The panels a live post shows: chat only, voice only, or both."""
+        if kind == "both":
+            return await self._both_leaderboard_view(guild, limit)
+        rows, label = await self._top_rows(guild.id, kind, limit)
+        return self._leaderboard_view(guild, rows, kind, label, limit)
+
+    async def _leaderboard_help_embed(self, guild_id):
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                "SELECT live_last_posted FROM leaderboard_settings WHERE guild_id = ?", (guild_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+
+        stamp = row[0] if row and row[0] else None
+        if stamp:
+            try:
+                refreshed = datetime.fromisoformat(stamp).strftime("%d %b %Y, %I:%M %p")
+            except ValueError:
+                refreshed = "unknown"
+        else:
+            refreshed = "no live panel yet"
+
+        embed = discord.Embed(
+            title="🏆 Leaderboards",
+            description=(
+                "`leaderboard chat` — chat top 10\n"
+                "`leaderboard vc` — voice top 10\n"
+                "`leaderboard schedule` — daily or weekly posts\n"
+                "`leaderboard live` — self-refreshing panel (chat, VC or both)\n"
+                "`leaderboard liveinterval` — how often the live panel refreshes"
+            ),
+            color=0xFF0000,
+            timestamp=datetime.now(IST),
+        )
+        embed.set_footer(text=f"Last refreshed: {refreshed}")
+        return embed
+
     @commands.hybrid_group(name="leaderboard", aliases=["lb"], invoke_without_command=True, description="Chat and voice leaderboards")
     async def leaderboard(self, ctx):
         if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
+            await ctx.send(embed=await self._leaderboard_help_embed(ctx.guild.id))
 
     @leaderboard.command(name="chat", description="Show the chat leaderboard")
     async def leaderboard_chat(self, ctx):
@@ -3969,21 +4199,31 @@ class Leveling (commands .Cog ):
                 row = await cursor.fetchone()
         return self._clamp_interval(row[0] if row and row[0] is not None else 30)
 
-    async def start_live_leaderboard(self, guild, channel, interval=None):
-        view = await self._both_leaderboard_view(guild)
+    @staticmethod
+    def _normalise_kind(raw):
+        value = (raw or "both").strip().lower()
+        return value if value in ("chat", "vc", "both") else None
+
+    @staticmethod
+    def _kind_label(kind):
+        return {"chat": "chat", "vc": "VC"}.get(kind, "chat + VC")
+
+    async def start_live_leaderboard(self, guild, channel, interval=None, kind="both"):
+        kind = self._normalise_kind(kind) or "both"
+        view = await self._live_leaderboard_view(guild, kind)
         message = await channel.send(view=view)
         stamp = datetime.now(IST).isoformat()
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("INSERT OR IGNORE INTO leaderboard_settings (guild_id) VALUES (?)", (guild.id,))
             if interval is None:
                 await db.execute(
-                    "UPDATE leaderboard_settings SET live_channel_id = ?, live_message_id = ?, live_last_posted = ? WHERE guild_id = ?",
-                    (channel.id, message.id, stamp, guild.id),
+                    "UPDATE leaderboard_settings SET live_channel_id = ?, live_message_id = ?, live_kind = ?, live_last_posted = ? WHERE guild_id = ?",
+                    (channel.id, message.id, kind, stamp, guild.id),
                 )
             else:
                 await db.execute(
-                    "UPDATE leaderboard_settings SET live_channel_id = ?, live_message_id = ?, live_interval = ?, live_last_posted = ? WHERE guild_id = ?",
-                    (channel.id, message.id, self._clamp_interval(interval), stamp, guild.id),
+                    "UPDATE leaderboard_settings SET live_channel_id = ?, live_message_id = ?, live_interval = ?, live_kind = ?, live_last_posted = ? WHERE guild_id = ?",
+                    (channel.id, message.id, self._clamp_interval(interval), kind, stamp, guild.id),
                 )
             await db.commit()
         return message
@@ -3991,14 +4231,19 @@ class Leveling (commands .Cog ):
     async def _live_summary(self, guild_id):
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
-                "SELECT live_channel_id, live_interval FROM leaderboard_settings WHERE guild_id = ?", (guild_id,)
+                "SELECT live_channel_id, live_interval, live_kind FROM leaderboard_settings WHERE guild_id = ?",
+                (guild_id,),
             ) as cursor:
                 row = await cursor.fetchone()
         if not row or not row[0]:
             return "Not running."
         interval = self._clamp_interval(row[1] if len(row) > 1 else 30)
+        kind = self._normalise_kind(row[2] if len(row) > 2 else "both") or "both"
         plural = "" if interval == 1 else "s"
-        return f"Updating every {interval} minute{plural} in <#{row[0]}>."
+        return (
+            f"Updating every {interval} minute{plural} in <#{row[0]}> "
+            f"— showing {self._kind_label(kind)}."
+        )
 
     @leaderboard.command(name="schedule", description="Schedule daily or weekly leaderboard posts (IST)")
     @commands.has_permissions(manage_guild=True)
@@ -4060,7 +4305,8 @@ class Leveling (commands .Cog ):
     @leaderboard.command(name="live", description="Post a leaderboard that refreshes on a configurable interval")
     @commands.has_permissions(manage_guild=True)
     async def leaderboard_live(self, ctx, channel: Optional[discord.TextChannel] = None,
-                               action: Optional[str] = None, interval: Optional[int] = None):
+                               action: Optional[str] = None, interval: Optional[int] = None,
+                               kind: Optional[str] = None):
         if action and action.lower() in ("off", "disable", "stop"):
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute(
@@ -4071,19 +4317,31 @@ class Leveling (commands .Cog ):
             await ctx.send("🛑 Live leaderboard updates are now off.")
             return
 
+        # `leaderboard live #chan chat` picks what the panel shows.
+        if action and action.strip().lower() in ("chat", "vc", "both"):
+            kind, action = action.strip().lower(), None
+
+        kind = self._normalise_kind(kind or "both")
+        if kind is None:
+            await ctx.send(f"{CROSS} Show must be `chat`, `vc` or `both`.")
+            return
+
         # `leaderboard live #chan 15` passes the interval through the action slot.
         if interval is None and action and action.strip().isdigit():
             interval = int(action)
 
         if channel is not None:
             minutes = await self.get_live_interval(ctx.guild.id) if interval is None else self._clamp_interval(interval)
-            await self.start_live_leaderboard(ctx.guild, channel, interval)
+            await self.start_live_leaderboard(ctx.guild, channel, interval, kind)
             plural = "" if minutes == 1 else "s"
-            await ctx.send(f"✅ Live leaderboard started in {channel.mention} — it refreshes every {minutes} minute{plural} (chat + VC).")
+            await ctx.send(
+                f"✅ Live leaderboard started in {channel.mention} — it refreshes every "
+                f"{minutes} minute{plural} ({self._kind_label(kind)})."
+            )
             return
 
         current_interval = await self.get_live_interval(ctx.guild.id)
-        build_modal = lambda: LeaderboardLiveModal(self, ctx.guild, ctx.channel, current_interval)
+        build_modal = lambda: LeaderboardLiveModal(self, ctx.guild, ctx.channel, current_interval, kind)
 
         interaction = getattr(ctx, 'interaction', None)
         if interaction is not None:
@@ -4173,7 +4431,7 @@ class Leveling (commands .Cog ):
             try:
                 async with aiosqlite.connect(self.db_path) as db:
                     async with db.execute(
-                        "SELECT live_channel_id, live_message_id, live_interval, live_last_posted FROM leaderboard_settings WHERE guild_id = ?",
+                        "SELECT live_channel_id, live_message_id, live_interval, live_last_posted, live_kind FROM leaderboard_settings WHERE guild_id = ?",
                         (guild.id,),
                     ) as cursor:
                         row = await cursor.fetchone()
@@ -4184,6 +4442,7 @@ class Leveling (commands .Cog ):
                 message_id = row[1]
                 interval = self._clamp_interval(row[2] if len(row) > 2 else 30)
                 last_posted = row[3] if len(row) > 3 else None
+                kind = self._normalise_kind(row[4] if len(row) > 4 else "both") or "both"
 
                 if last_posted:
                     try:
@@ -4200,7 +4459,7 @@ class Leveling (commands .Cog ):
                 if channel is None:
                     continue
 
-                view = await self._both_leaderboard_view(guild)
+                view = await self._live_leaderboard_view(guild, kind)
                 message = None
                 if message_id:
                     try:

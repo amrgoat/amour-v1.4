@@ -17,7 +17,7 @@ class _vclevel(commands.Cog):
     @commands.group()
     async def __VCLeveling__(self, ctx: commands.Context):
         """__**VC Rank**__
-`vclevel` , `rankvc`
+`vcrank` (alias `vr`) , `vclevel`
 __**VC Leaderboard**__
 `vcleaderboard` , `leaderboard vc`
 __**VC Setup**__
@@ -26,5 +26,6 @@ __**VC Rewards**__
 `vclevel rewards` , `vclevel rewards add` , `vclevel rewards list` , `vclevel rewards remove`
 __**VC Multipliers**__
 `vclevel multiplier` , `vclevel multiplier add` , `vclevel multiplier list` , `vclevel multiplier remove`
-__**All Rewards**__
-`rewards`"""
+__**VC Blacklist**__
+`vclevel blacklist` , `vclevel blacklist add` , `vclevel blacklist list` , `vclevel blacklist remove`
+"""

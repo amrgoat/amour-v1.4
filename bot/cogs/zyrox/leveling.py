@@ -18,9 +18,9 @@ class _leveling(commands.Cog):
     @commands.group()
     async def __Leveling__(self, ctx: commands.Context):
         """__**Chat Rank**__
-`chatrank` , `rankchat`
+`chatrank` (alias `cr`)
 __**Leaderboards**__
-`leaderboard` , `leaderboard chat` , `leaderboard schedule` , `leaderboard live` , `leaderboard liveinterval`
+`leaderboard` , `leaderboard chat` , `leaderboard vc` , `leaderboard schedule` , `leaderboard live` , `leaderboard liveinterval`
 __**XP Settings**__
 `chatlevel` , `chatlevel settings` , `chatlevel setxp` , `chatlevel setmessage` , `chatlevel setcolor` , `chatlevel thumbnail` , `chatlevel cooldown` , `chatlevel channel` , `chatlevel enable` , `chatlevel disable`
 __**Rewards & Roles**__
@@ -28,4 +28,4 @@ __**Rewards & Roles**__
 __**Multipliers & Blacklist**__
 `chatlevel multiplier` , `chatlevel multiplier add` , `chatlevel multiplier list` , `chatlevel multiplier remove` , `chatlevel blacklist` , `chatlevel blacklist add` , `chatlevel blacklist list` , `chatlevel blacklist remove`
 __**Utilities**__
-`chatlevel overview` , `rewards` , `chatlevel placeholders` , `chatlevel stats` , `chatlevel test` , `setxp` , `resetxp` , `setlevel`"""
+`chatlevel overview` , `chatlevel placeholders` , `chatlevel stats` , `chatlevel test` , `setxp` , `resetxp` , `setlevel`"""
